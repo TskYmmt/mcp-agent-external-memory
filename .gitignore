@@ -40,6 +40,11 @@ Thumbs.db
 # Project specific
 databases/*.db
 !databases/.gitkeep
+.mcp.json
+ai-memo.md
+
+# Claude Code
+.claude/
 
 # Logs
 *.log

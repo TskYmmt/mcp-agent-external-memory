@@ -3,14 +3,15 @@
 MCP Server for Database Management
 
 This MCP server provides tools for AI agents to autonomously create and manage
-SQLite databases.
+SQLite databases with rich metadata.
 
 Key features:
-- Dynamic database and table creation
+- Dynamic database and table creation with required metadata
 - Secure data insertion with transaction support
 - SQL query capabilities for data analysis
-- Metadata tracking for all databases
+- Metadata tracking for all databases, tables, and columns
 - Safe database deletion with confirmation
+- Self-documenting API with usage guides
 """
 
 import logging
@@ -26,6 +27,8 @@ from db_operations import (
     get_table_schema,
     list_all_databases,
     delete_database,
+    get_database_info,
+    get_table_info,
 )
 
 # Configure logging
@@ -40,59 +43,247 @@ mcp = FastMCP("database-manager")
 
 
 @mcp.tool()
+def get_usage_guide_tool() -> dict[str, Any]:
+    """
+    このデータベース管理サーバーの使い方ガイドを取得します。
+
+    データベースの作成方法、スキーマ定義の形式、典型的なワークフローなど、
+    このサーバーを効果的に使用するための包括的な情報を提供します。
+
+    Returns:
+        使い方ガイド（概要、スキーマ形式、ワークフロー例、ベストプラクティス）
+    """
+    return {
+        "status": "success",
+        "overview": {
+            "purpose": "AIエージェントがデータを自律的に蓄積・管理するためのデータベースサーバー",
+            "key_features": [
+                "メタデータ必須のデータベース作成",
+                "カラムごとの詳細な説明を保持",
+                "データベース・テーブル情報の詳細取得",
+                "セキュアなデータ挿入と検索",
+                "2段階確認による安全な削除"
+            ]
+        },
+        "schema_format": {
+            "description": "データベース作成時は以下の形式でスキーマを指定します",
+            "required_structure": {
+                "database_description": "データベース全体の目的（5文字以上必須）",
+                "tables": [
+                    {
+                        "table_name": "テーブル名（必須）",
+                        "table_description": "テーブルの説明（5文字以上必須）",
+                        "columns": [
+                            {
+                                "name": "カラム名（必須）",
+                                "type": "データ型（必須、例: INTEGER, TEXT, REAL）",
+                                "description": "カラムの説明（5文字以上必須）",
+                                "constraints": "制約（オプション、例: PRIMARY KEY, NOT NULL）"
+                            }
+                        ]
+                    }
+                ]
+            },
+            "example": {
+                "database_description": "2025年顧客データ分析プロジェクト",
+                "tables": [
+                    {
+                        "table_name": "customers",
+                        "table_description": "顧客の基本情報と連絡先",
+                        "columns": [
+                            {
+                                "name": "id",
+                                "type": "INTEGER",
+                                "description": "顧客の一意識別子",
+                                "constraints": "PRIMARY KEY AUTOINCREMENT"
+                            },
+                            {
+                                "name": "name",
+                                "type": "TEXT",
+                                "description": "顧客の氏名（フルネーム）",
+                                "constraints": "NOT NULL"
+                            },
+                            {
+                                "name": "email",
+                                "type": "TEXT",
+                                "description": "連絡先メールアドレス",
+                                "constraints": ""
+                            },
+                            {
+                                "name": "created_at",
+                                "type": "TEXT",
+                                "description": "顧客登録日時（ISO8601形式）",
+                                "constraints": ""
+                            }
+                        ]
+                    }
+                ]
+            }
+        },
+        "typical_workflows": {
+            "新しいDBを作成する場合": [
+                "1. get_usage_guide_tool() でスキーマ形式を確認",
+                "2. create_database_tool(database_name, schema) で作成",
+                "3. insert_data_tool() でデータ挿入",
+                "4. query_data_tool() でデータ確認"
+            ],
+            "既存DBにデータを追加する場合": [
+                "1. list_databases_tool() でDB一覧確認",
+                "2. get_database_info_tool(database_name) でDB詳細確認",
+                "3. get_table_info_tool(database_name, table_name) でテーブル構造とサンプルデータ確認",
+                "4. insert_data_tool() でデータ挿入"
+            ],
+            "データを検索・分析する場合": [
+                "1. get_table_info_tool() でカラム構造確認",
+                "2. query_data_tool() でSQL検索実行"
+            ]
+        },
+        "best_practices": [
+            "database_description には、このDBが何のために作られたか明確に記述する",
+            "table_description には、このテーブルが何を格納するか具体的に記述する",
+            "column description には、カラムの意味と単位（該当する場合）を記述する",
+            "constraints は適切に設定する（PRIMARY KEY, NOT NULL, UNIQUE など）",
+            "データ挿入前に get_table_info_tool() でスキーマを確認する"
+        ],
+        "validation_rules": {
+            "database_description": "5文字以上の文字列（必須）",
+            "table_description": "5文字以上の文字列（必須）",
+            "column description": "5文字以上の文字列（必須）",
+            "その他のフィールド": "非空の文字列（必須、constraintsを除く）"
+        }
+    }
+
+
+@mcp.tool()
 def create_database_tool(
     database_name: str,
-    table_schema: dict[str, Any],
-    description: str
+    schema: dict[str, Any]
 ) -> dict[str, Any]:
     """
     新しいデータベースとテーブルを作成します。
 
-    このツールはデータ内容に最適化されたデータベース構造を作成します。
-    各データベースには自動的にメタデータテーブルが追加され、作成日時や目的が記録されます。
+    **重要**: メタデータが必須です。database_description、table_description、
+    各カラムの description を必ず5文字以上で指定してください。
 
     Args:
-        database_name: データベース名（拡張子.db不要）。調査テーマに基づいた分かりやすい名前を推奨
-        table_schema: テーブル定義を含む辞書
-            - table_name (str): テーブル名
-            - columns (dict): カラム定義 {"カラム名": "型と制約"}
-            例: {
-                "table_name": "companies",
-                "columns": {
-                    "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
-                    "company_name": "TEXT NOT NULL",
-                    "market_cap": "REAL"
-                }
-            }
-        description: このデータベースの目的・説明（後で参照可能）
+        database_name: データベース名（拡張子.db不要）
+        schema: データベーススキーマ（database_description, tables を含む）
+            詳細な形式は get_usage_guide_tool() で確認してください。
 
     Returns:
-        作成成功メッセージ、データベースパス、テーブル名を含む辞書
+        作成成功メッセージ、データベースパス、作成されたテーブル一覧
 
     Raises:
-        ValueError: スキーマが不正な場合
+        ValueError: スキーマが不正、またはメタデータが不足している場合
         FileExistsError: 同名のデータベースが既に存在する場合
 
     Example:
-        create_database(
-            database_name="tech_companies_2025",
-            table_schema={
-                "table_name": "companies",
-                "columns": {
-                    "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
-                    "name": "TEXT NOT NULL",
-                    "industry": "TEXT",
-                    "market_cap": "REAL",
-                    "created_date": "TEXT"
-                }
-            },
-            description="テクノロジー企業の市場調査データ"
+        create_database_tool(
+            database_name="customers_2025",
+            schema={
+                "database_description": "2025年顧客データ",
+                "tables": [{
+                    "table_name": "customers",
+                    "table_description": "顧客の基本情報",
+                    "columns": [
+                        {
+                            "name": "id",
+                            "type": "INTEGER",
+                            "description": "顧客ID（一意）",
+                            "constraints": "PRIMARY KEY"
+                        },
+                        {
+                            "name": "name",
+                            "type": "TEXT",
+                            "description": "顧客氏名",
+                            "constraints": "NOT NULL"
+                        }
+                    ]
+                }]
+            }
         )
     """
     try:
-        return create_database(database_name, table_schema, description)
+        return create_database(database_name, schema)
     except Exception as e:
-        logger.error(f"Error in create_database: {e}")
+        logger.error(f"Error in create_database_tool: {e}")
+        raise
+
+
+@mcp.tool()
+def get_database_info_tool(database_name: str) -> dict[str, Any]:
+    """
+    データベースの詳細情報を取得します。
+
+    データベースの説明、含まれるテーブル、レコード数、作成日時などの
+    包括的な情報を取得できます。
+
+    Args:
+        database_name: 対象データベース名
+
+    Returns:
+        データベースの詳細情報
+            - database_name: DB名
+            - database_description: DBの目的・説明
+            - tables: テーブル名の一覧
+            - table_count: テーブル数
+            - total_records: 全レコード数
+            - size_mb: ファイルサイズ
+            - created_at: 作成日時
+            - updated_at: 最終更新日時
+            - schema: 完全なスキーマ情報（利用可能な場合）
+
+    Raises:
+        FileNotFoundError: データベースが存在しない場合
+
+    Example:
+        get_database_info_tool("customers_2025")
+    """
+    try:
+        return get_database_info(database_name)
+    except Exception as e:
+        logger.error(f"Error in get_database_info_tool: {e}")
+        raise
+
+
+@mcp.tool()
+def get_table_info_tool(database_name: str, table_name: str) -> dict[str, Any]:
+    """
+    テーブルの詳細情報を取得します。
+
+    テーブルの説明、カラム構造（型、制約、説明）、レコード数、
+    サンプルデータ（最大3件）を取得できます。
+
+    Args:
+        database_name: 対象データベース名
+        table_name: 対象テーブル名
+
+    Returns:
+        テーブルの詳細情報
+            - database_name: DB名
+            - table_name: テーブル名
+            - table_description: テーブルの説明
+            - columns: カラム情報の配列
+                - name: カラム名
+                - type: データ型
+                - description: カラムの説明
+                - not_null: NULL許可フラグ
+                - default_value: デフォルト値
+                - is_primary_key: 主キーフラグ
+            - record_count: レコード数
+            - sample_data: サンプルデータ（最大3件）
+
+    Raises:
+        FileNotFoundError: データベースが存在しない場合
+        ValueError: テーブルが存在しない場合
+
+    Example:
+        get_table_info_tool("customers_2025", "customers")
+    """
+    try:
+        return get_table_info(database_name, table_name)
+    except Exception as e:
+        logger.error(f"Error in get_table_info_tool: {e}")
         raise
 
 
@@ -112,33 +303,28 @@ def insert_data_tool(
         database_name: 対象データベース名
         table_name: 対象テーブル名
         data: 挿入するデータ（単一の辞書または辞書のリスト）
-            例（単一）: {"company_name": "Apple", "market_cap": 3000000000000}
-            例（複数）: [
-                {"company_name": "Apple", "market_cap": 3000000000000},
-                {"company_name": "Microsoft", "market_cap": 2800000000000}
-            ]
 
     Returns:
-        挿入された行数とステータスを含む辞書
+        挿入された行数とステータス
 
     Raises:
         FileNotFoundError: データベースが存在しない場合
         ValueError: データ形式が不正な場合、または整合性エラー
 
     Example:
-        insert_data(
-            database_name="tech_companies_2025",
-            table_name="companies",
+        insert_data_tool(
+            database_name="customers_2025",
+            table_name="customers",
             data=[
-                {"name": "Apple", "industry": "Technology", "market_cap": 3.0e12},
-                {"name": "Microsoft", "industry": "Technology", "market_cap": 2.8e12}
+                {"name": "山田太郎", "email": "yamada@example.com"},
+                {"name": "佐藤花子", "email": "sato@example.com"}
             ]
         )
     """
     try:
         return insert_data(database_name, table_name, data)
     except Exception as e:
-        logger.error(f"Error in insert_data: {e}")
+        logger.error(f"Error in insert_data_tool: {e}")
         raise
 
 
@@ -156,7 +342,6 @@ def query_data_tool(
     Args:
         database_name: 対象データベース名
         sql_query: SELECT文によるクエリ
-            例: "SELECT * FROM companies WHERE industry = 'Technology' ORDER BY market_cap DESC LIMIT 10"
 
     Returns:
         カラム名、行データ、行数を含む辞書
@@ -166,15 +351,15 @@ def query_data_tool(
         ValueError: SELECT以外のクエリを実行しようとした場合、またはクエリ構文エラー
 
     Example:
-        query_data(
-            database_name="tech_companies_2025",
-            sql_query="SELECT name, market_cap FROM companies WHERE market_cap > 1000000000000 ORDER BY market_cap DESC"
+        query_data_tool(
+            database_name="customers_2025",
+            sql_query="SELECT name, email FROM customers WHERE name LIKE '山田%'"
         )
     """
     try:
         return query_data(database_name, sql_query)
     except Exception as e:
-        logger.error(f"Error in query_data: {e}")
+        logger.error(f"Error in query_data_tool: {e}")
         raise
 
 
@@ -186,29 +371,24 @@ def get_schema_tool(
     """
     テーブルのスキーマ情報を取得します。
 
-    既存のテーブルにデータを追加する際に、カラム構成を確認するために使用します。
+    **非推奨**: このツールは後方互換性のために残されています。
+    より詳細な情報が必要な場合は get_table_info_tool() を使用してください。
 
     Args:
         database_name: 対象データベース名
         table_name: 対象テーブル名
 
     Returns:
-        カラム情報の詳細（名前、型、NULL許可、デフォルト値、主キーフラグ）を含む辞書
+        カラム情報の詳細（名前、型、NULL許可、デフォルト値、主キーフラグ）
 
     Raises:
         FileNotFoundError: データベースが存在しない場合
         ValueError: テーブルが存在しない場合
-
-    Example:
-        get_schema(
-            database_name="tech_companies_2025",
-            table_name="companies"
-        )
     """
     try:
         return get_table_schema(database_name, table_name)
     except Exception as e:
-        logger.error(f"Error in get_schema: {e}")
+        logger.error(f"Error in get_schema_tool: {e}")
         raise
 
 
@@ -217,47 +397,19 @@ def list_databases_tool() -> dict[str, Any]:
     """
     MCPサーバーが管理するすべてのデータベースを一覧表示します。
 
-    各データベースの詳細情報（サイズ、作成日時、テーブル数、レコード数など）を取得できます。
-
-    Args:
-        なし
+    各データベースの概要情報（サイズ、作成日時、テーブル数、レコード数など）を取得できます。
+    詳細情報が必要な場合は get_database_info_tool() を使用してください。
 
     Returns:
-        データベース情報の配列を含む辞書
-        各データベースには以下の情報が含まれます:
-        - database_name: データベースファイル名
-        - size_mb: ファイルサイズ（MB）
-        - created_at: 作成日時（ISO形式）
-        - updated_at: 最終更新日時（ISO形式）
-        - description: データベースの説明
-        - tables: テーブル名のリスト
-        - table_count: テーブル数
-        - total_records: 全テーブルの合計レコード数
+        データベース情報の配列
 
     Example:
-        list_databases()
-        # Returns:
-        # {
-        #     "status": "success",
-        #     "database_count": 2,
-        #     "databases": [
-        #         {
-        #             "database_name": "tech_companies_2025.db",
-        #             "size_mb": 2.5,
-        #             "created_at": "2025-01-15T10:30:00",
-        #             "description": "テクノロジー企業の市場調査",
-        #             "tables": ["companies", "market_data"],
-        #             "table_count": 2,
-        #             "total_records": 150
-        #         },
-        #         ...
-        #     ]
-        # }
+        list_databases_tool()
     """
     try:
         return list_all_databases()
     except Exception as e:
-        logger.error(f"Error in list_databases: {e}")
+        logger.error(f"Error in list_databases_tool: {e}")
         raise
 
 
@@ -278,7 +430,7 @@ def delete_database_tool(
         confirm: 削除確認フラグ（trueの場合のみ実行）
 
     Returns:
-        削除結果メッセージまたは確認要求メッセージを含む辞書
+        削除結果メッセージまたは確認要求メッセージ
 
     Raises:
         FileNotFoundError: データベースが存在しない場合
@@ -287,11 +439,9 @@ def delete_database_tool(
     Example:
         # Step 1: 確認
         delete_database_tool(database_name="old_data.db", confirm=False)
-        # Returns confirmation request with database info
 
         # Step 2: 実行
         delete_database_tool(database_name="old_data.db", confirm=True)
-        # Actually deletes the database
     """
     try:
         return delete_database(database_name, confirm)

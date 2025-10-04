@@ -121,4 +121,13 @@ mcp-agent-external-memory/
 - ✅ コーディング規約準拠
 - ✅ 汎用的な名称に変更
 
-## 実装完了 ✅
+## 進行中: AI-Friendly Enhancement (2025-10-04)
+
+### メタデータ必須化とツール追加
+- ✅ db_operations.py: スキーマバリデーション、get_database_info, get_table_info実装
+- 🔄 server.py: 新ツール追加中
+- ⏳ テスト/ドキュメント更新予定
+
+---
+
+## 初期実装完了 ✅（2025-10-04）

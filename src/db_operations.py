@@ -58,34 +58,147 @@ def _update_metadata(conn: sqlite3.Connection, key: str, value: str) -> None:
     conn.commit()
 
 
+def _validate_schema(schema: dict[str, Any]) -> tuple[bool, str]:
+    """
+    Validate database schema with metadata requirements.
+
+    Args:
+        schema: Schema dictionary to validate
+
+    Returns:
+        (is_valid, error_message)
+    """
+    # Check database_description
+    if "database_description" not in schema:
+        return False, (
+            "必須項目 'database_description' がありません。\n"
+            "データベース全体の目的を記述してください。\n\n"
+            "例: {'database_description': '2025年顧客データ分析', 'tables': [...]}"
+        )
+
+    db_desc = schema["database_description"]
+    if not isinstance(db_desc, str) or len(db_desc.strip()) < 5:
+        return False, (
+            "'database_description' は5文字以上の文字列で指定してください。\n"
+            "このデータベースが何のために作成されるのか、具体的に説明してください。\n\n"
+            "例: '2025年第1四半期の売上分析データ'"
+        )
+
+    # Check tables
+    if "tables" not in schema or not isinstance(schema["tables"], list):
+        return False, "'tables' は配列で指定してください。"
+
+    if len(schema["tables"]) == 0:
+        return False, "少なくとも1つのテーブル定義が必要です。"
+
+    # Validate each table
+    for i, table in enumerate(schema["tables"]):
+        if not isinstance(table, dict):
+            return False, f"テーブル {i+1} が不正な形式です。辞書で指定してください。"
+
+        # Check table_name
+        if "table_name" not in table:
+            return False, f"テーブル {i+1} の 'table_name' が必須です。"
+
+        if not isinstance(table["table_name"], str) or not table["table_name"].strip():
+            return False, f"テーブル {i+1} の 'table_name' は非空の文字列で指定してください。"
+
+        # Check table_description
+        if "table_description" not in table:
+            return False, (
+                f"テーブル '{table['table_name']}' の 'table_description' が必須です。\n"
+                f"このテーブルが何を格納するのか説明してください。\n\n"
+                f"例: 'table_description': '顧客の基本情報と連絡先'"
+            )
+
+        table_desc = table["table_description"]
+        if not isinstance(table_desc, str) or len(table_desc.strip()) < 5:
+            return False, (
+                f"テーブル '{table['table_name']}' の 'table_description' は5文字以上で指定してください。"
+            )
+
+        # Check columns
+        if "columns" not in table or not isinstance(table["columns"], list):
+            return False, f"テーブル '{table['table_name']}' の 'columns' は配列で指定してください。"
+
+        if len(table["columns"]) == 0:
+            return False, f"テーブル '{table['table_name']}' に少なくとも1つのカラムが必要です。"
+
+        # Validate each column
+        for j, col in enumerate(table["columns"]):
+            if not isinstance(col, dict):
+                return False, (
+                    f"テーブル '{table['table_name']}' のカラム {j+1} が不正な形式です。"
+                )
+
+            # Check name
+            if "name" not in col or not isinstance(col["name"], str) or not col["name"].strip():
+                return False, (
+                    f"テーブル '{table['table_name']}' のカラム {j+1} の 'name' が必須です。"
+                )
+
+            # Check type
+            if "type" not in col or not isinstance(col["type"], str) or not col["type"].strip():
+                return False, (
+                    f"テーブル '{table['table_name']}' のカラム '{col.get('name', j+1)}' の 'type' が必須です。"
+                )
+
+            # Check description
+            if "description" not in col:
+                return False, (
+                    f"テーブル '{table['table_name']}' のカラム '{col['name']}' の 'description' が必須です。\n"
+                    f"このカラムが何を表すのか説明してください。\n\n"
+                    f"例: 'description': '顧客の登録日時（UTC）'"
+                )
+
+            col_desc = col["description"]
+            if not isinstance(col_desc, str) or len(col_desc.strip()) < 5:
+                return False, (
+                    f"テーブル '{table['table_name']}' のカラム '{col['name']}' の 'description' は5文字以上で指定してください。"
+                )
+
+    return True, ""
+
+
 def create_database(
     database_name: str,
-    table_schema: dict[str, Any],
-    description: str
+    schema: dict[str, Any]
 ) -> dict[str, Any]:
     """
-    Create a new database with specified table schema.
+    Create a new database with specified schema including metadata.
 
     Args:
         database_name: Database file name (without .db extension)
-        table_schema: Dict with 'table_name' and 'columns' keys
-        description: Purpose/description of this database
+        schema: Database schema with metadata
+            {
+                "database_description": str (5+ chars),
+                "tables": [
+                    {
+                        "table_name": str,
+                        "table_description": str (5+ chars),
+                        "columns": [
+                            {
+                                "name": str,
+                                "type": str,
+                                "description": str (5+ chars),
+                                "constraints": str (optional)
+                            }
+                        ]
+                    }
+                ]
+            }
 
     Returns:
-        Dict with status, db_path, and table_name
+        Dict with status, db_path, and created tables
 
     Raises:
-        ValueError: If schema is invalid or DB already exists
+        ValueError: If schema is invalid
+        FileExistsError: If database already exists
     """
     # Validate schema
-    if "table_name" not in table_schema or "columns" not in table_schema:
-        raise ValueError("table_schema must contain 'table_name' and 'columns' keys")
-
-    table_name = table_schema["table_name"]
-    columns = table_schema["columns"]
-
-    if not isinstance(columns, dict) or len(columns) == 0:
-        raise ValueError("columns must be a non-empty dictionary")
+    is_valid, error_msg = _validate_schema(schema)
+    if not is_valid:
+        raise ValueError(error_msg)
 
     db_path = _get_db_path(database_name)
 
@@ -97,34 +210,50 @@ def create_database(
         )
 
     logger.info(f"Creating database: {database_name}")
-    logger.debug(f"Table schema: {table_schema}")
+    logger.debug(f"Schema: {schema}")
 
-    # Create database and table
+    # Create database and tables
     conn = sqlite3.connect(db_path)
     try:
         # Create metadata table
         _ensure_metadata_table(conn)
 
-        # Store database description and metadata
-        _update_metadata(conn, "description", description)
-        _update_metadata(conn, "tables", json.dumps([table_name]))
+        # Store database description
+        _update_metadata(conn, "database_description", schema["database_description"])
 
-        # Build CREATE TABLE statement
-        column_defs = []
-        for col_name, col_type in columns.items():
-            column_defs.append(f"{col_name} {col_type}")
+        # Store complete schema as JSON for later retrieval
+        _update_metadata(conn, "schema", json.dumps(schema, ensure_ascii=False))
 
-        create_sql = f"CREATE TABLE {table_name} ({', '.join(column_defs)})"
-        logger.debug(f"Executing SQL: {create_sql}")
+        # Extract table names
+        table_names = [table["table_name"] for table in schema["tables"]]
+        _update_metadata(conn, "tables", json.dumps(table_names))
 
-        conn.execute(create_sql)
+        # Create each table
+        created_tables = []
+        for table in schema["tables"]:
+            table_name = table["table_name"]
+
+            # Build CREATE TABLE statement
+            column_defs = []
+            for col in table["columns"]:
+                col_def = f"{col['name']} {col['type']}"
+                if col.get("constraints"):
+                    col_def += f" {col['constraints']}"
+                column_defs.append(col_def)
+
+            create_sql = f"CREATE TABLE {table_name} ({', '.join(column_defs)})"
+            logger.debug(f"Executing SQL: {create_sql}")
+
+            conn.execute(create_sql)
+            created_tables.append(table_name)
+
         conn.commit()
 
         return {
             "status": "success",
-            "message": f"Database '{database_name}' created successfully",
+            "message": f"Database '{database_name}' created successfully with {len(created_tables)} table(s)",
             "db_path": str(db_path),
-            "table_name": table_name
+            "tables": created_tables
         }
 
     except Exception as e:
@@ -472,3 +601,155 @@ def delete_database(
     except Exception as e:
         logger.error(f"Failed to delete database: {e}")
         raise RuntimeError(f"Failed to delete database: {e}")
+
+
+def get_database_info(database_name: str) -> dict[str, Any]:
+    """
+    Get detailed information about a specific database.
+
+    Args:
+        database_name: Target database name
+
+    Returns:
+        Dict with database details including description, tables, and metadata
+
+    Raises:
+        FileNotFoundError: If database doesn't exist
+    """
+    db_path = _get_db_path(database_name)
+
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database '{database_name}' not found")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        # Get metadata
+        cursor = conn.execute("SELECT key, value FROM _metadata")
+        metadata = dict(cursor.fetchall())
+
+        # Get tables (excluding metadata and sqlite internal)
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != '_metadata'"
+        )
+        tables = [row[0] for row in cursor.fetchall()]
+
+        # Get total record count
+        total_records = 0
+        for table in tables:
+            cursor = conn.execute(f"SELECT COUNT(*) FROM {table}")
+            total_records += cursor.fetchone()[0]
+
+        # Parse stored schema if available
+        schema_json = metadata.get("schema")
+        schema_info = None
+        if schema_json:
+            try:
+                schema_info = json.loads(schema_json)
+            except:
+                pass
+
+        return {
+            "status": "success",
+            "database_name": database_name,
+            "database_description": metadata.get("database_description", metadata.get("description", "")),
+            "tables": tables,
+            "table_count": len(tables),
+            "total_records": total_records,
+            "size_mb": round(db_path.stat().st_size / (1024 * 1024), 2),
+            "created_at": datetime.fromtimestamp(db_path.stat().st_ctime).isoformat(),
+            "updated_at": datetime.fromtimestamp(db_path.stat().st_mtime).isoformat(),
+            "schema": schema_info
+        }
+
+    finally:
+        conn.close()
+
+
+def get_table_info(database_name: str, table_name: str) -> dict[str, Any]:
+    """
+    Get detailed information about a specific table including column descriptions.
+
+    Args:
+        database_name: Target database name
+        table_name: Target table name
+
+    Returns:
+        Dict with table details, column info with descriptions, and sample data
+
+    Raises:
+        FileNotFoundError: If database doesn't exist
+        ValueError: If table doesn't exist
+    """
+    db_path = _get_db_path(database_name)
+
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database '{database_name}' not found")
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        # Check if table exists
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+            (table_name,)
+        )
+        if not cursor.fetchone():
+            raise ValueError(f"Table '{table_name}' not found in database '{database_name}'")
+
+        # Get stored schema to retrieve descriptions
+        cursor = conn.execute("SELECT value FROM _metadata WHERE key = 'schema'")
+        schema_row = cursor.fetchone()
+
+        table_description = ""
+        column_descriptions = {}
+
+        if schema_row:
+            try:
+                schema = json.loads(schema_row[0])
+                # Find this table in the schema
+                for table in schema.get("tables", []):
+                    if table["table_name"] == table_name:
+                        table_description = table.get("table_description", "")
+                        # Build column descriptions map
+                        for col in table.get("columns", []):
+                            column_descriptions[col["name"]] = col.get("description", "")
+                        break
+            except:
+                pass
+
+        # Get table schema using PRAGMA
+        cursor = conn.execute(f"PRAGMA table_info({table_name})")
+        columns_info = []
+        for col in cursor.fetchall():
+            col_name = col[1]
+            columns_info.append({
+                "name": col_name,
+                "type": col[2],
+                "not_null": bool(col[3]),
+                "default_value": col[4],
+                "is_primary_key": bool(col[5]),
+                "description": column_descriptions.get(col_name, "")
+            })
+
+        # Get record count
+        cursor = conn.execute(f"SELECT COUNT(*) FROM {table_name}")
+        record_count = cursor.fetchone()[0]
+
+        # Get sample data (up to 3 rows)
+        cursor = conn.execute(f"SELECT * FROM {table_name} LIMIT 3")
+        sample_rows = cursor.fetchall()
+        sample_data = [dict(row) for row in sample_rows]
+
+        return {
+            "status": "success",
+            "database_name": database_name,
+            "table_name": table_name,
+            "table_description": table_description,
+            "columns": columns_info,
+            "record_count": record_count,
+            "sample_data": sample_data
+        }
+
+    finally:
+        conn.close()
