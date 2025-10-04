@@ -6,6 +6,7 @@ Provides core functions for creating, querying, and managing databases.
 import sqlite3
 import json
 import logging
+import csv
 from pathlib import Path
 from datetime import datetime
 from typing import Any
@@ -751,5 +752,258 @@ def get_table_info(database_name: str, table_name: str) -> dict[str, Any]:
             "sample_data": sample_data
         }
 
+    finally:
+        conn.close()
+
+
+def _infer_column_type(values: list[str]) -> str:
+    """
+    Infer SQLite data type from a list of string values.
+
+    Args:
+        values: List of string values from CSV column
+
+    Returns:
+        SQLite type: "INTEGER", "REAL", or "TEXT"
+    """
+    # Filter out empty values
+    non_empty = [v.strip() for v in values if v.strip()]
+
+    if not non_empty:
+        return "TEXT"
+
+    # Try INTEGER
+    try:
+        for v in non_empty:
+            int(v)
+        return "INTEGER"
+    except ValueError:
+        pass
+
+    # Try REAL
+    try:
+        for v in non_empty:
+            float(v)
+        return "REAL"
+    except ValueError:
+        pass
+
+    return "TEXT"
+
+
+def create_table_from_csv(
+    database_name: str,
+    table_name: str,
+    csv_path: str,
+    table_description: str,
+    column_descriptions: dict[str, str],
+    encoding: str = "utf-8",
+    primary_key_column: str | None = None
+) -> dict[str, Any]:
+    """
+    Create a new table from CSV file with automatic type inference.
+
+    Args:
+        database_name: Target database name (without .db extension)
+        table_name: Name of table to create
+        csv_path: Absolute path to CSV file
+        table_description: Description of the table (5+ characters)
+        column_descriptions: Dictionary mapping column names to descriptions (5+ chars each)
+        encoding: CSV file encoding (default: utf-8)
+        primary_key_column: Optional column name to use as PRIMARY KEY
+
+    Returns:
+        Dictionary with status, created table info, and import statistics
+
+    Raises:
+        FileNotFoundError: CSV file not found
+        ValueError: Invalid metadata, CSV format, or column descriptions
+        sqlite3.Error: Database operation failed
+    """
+    # Validate table description
+    if not table_description or len(table_description) < 5:
+        raise ValueError(
+            "table_description must be at least 5 characters. "
+            f"Got: '{table_description}' ({len(table_description)} chars)"
+        )
+
+    # Check CSV file exists
+    csv_file = Path(csv_path)
+    if not csv_file.exists():
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+
+    # Read CSV and infer schema
+    try:
+        with open(csv_file, encoding=encoding, newline='') as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+
+            if not rows:
+                raise ValueError(f"CSV file is empty: {csv_path}")
+
+            csv_columns = list(rows[0].keys())
+
+            # Validate column descriptions
+            missing_descriptions = set(csv_columns) - set(column_descriptions.keys())
+            if missing_descriptions:
+                raise ValueError(
+                    f"Missing descriptions for columns: {missing_descriptions}. "
+                    f"All columns must have descriptions (5+ characters)."
+                )
+
+            for col_name, desc in column_descriptions.items():
+                if col_name not in csv_columns:
+                    raise ValueError(
+                        f"Column '{col_name}' in column_descriptions not found in CSV. "
+                        f"CSV columns: {csv_columns}"
+                    )
+                if not desc or len(desc) < 5:
+                    raise ValueError(
+                        f"Description for column '{col_name}' must be at least 5 characters. "
+                        f"Got: '{desc}' ({len(desc)} chars)"
+                    )
+
+            # Validate primary key column if specified
+            if primary_key_column and primary_key_column not in csv_columns:
+                raise ValueError(
+                    f"primary_key_column '{primary_key_column}' not found in CSV. "
+                    f"Available columns: {csv_columns}"
+                )
+
+            # Infer types for each column
+            column_types = {}
+            for col_name in csv_columns:
+                values = [row[col_name] for row in rows]
+                column_types[col_name] = _infer_column_type(values)
+
+            logger.info(f"Inferred column types: {column_types}")
+
+    except UnicodeDecodeError as e:
+        raise ValueError(
+            f"Failed to decode CSV with encoding '{encoding}'. "
+            f"Try a different encoding (e.g., 'shift_jis', 'cp932'). Error: {e}"
+        )
+    except csv.Error as e:
+        raise ValueError(f"Invalid CSV format: {e}")
+
+    # Build schema
+    columns = []
+    for col_name in csv_columns:
+        col_type = column_types[col_name]
+        constraints = ""
+
+        if primary_key_column and col_name == primary_key_column:
+            constraints = "PRIMARY KEY"
+
+        columns.append({
+            "name": col_name,
+            "type": col_type,
+            "description": column_descriptions[col_name],
+            "constraints": constraints
+        })
+
+    schema = {
+        "database_description": f"Database imported from CSV: {csv_file.name}",
+        "tables": [{
+            "table_name": table_name,
+            "table_description": table_description,
+            "columns": columns
+        }]
+    }
+
+    # Check if database exists
+    db_path = _get_db_path(database_name)
+    db_exists = db_path.exists()
+
+    if db_exists:
+        # Database exists, just add the table
+        conn = sqlite3.connect(db_path)
+        try:
+            _ensure_metadata_table(conn)
+
+            # Check if table already exists
+            cursor = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+                (table_name,)
+            )
+            if cursor.fetchone():
+                raise ValueError(
+                    f"Table '{table_name}' already exists in database '{database_name}'. "
+                    f"Please use a different table name or database."
+                )
+
+            # Create table
+            column_defs = []
+            for col in columns:
+                col_def = f"{col['name']} {col['type']}"
+                if col.get('constraints'):
+                    col_def += f" {col['constraints']}"
+                column_defs.append(col_def)
+
+            create_sql = f"CREATE TABLE {table_name} ({', '.join(column_defs)})"
+            conn.execute(create_sql)
+
+            # Update metadata with new table
+            metadata_json = conn.execute(
+                "SELECT value FROM _metadata WHERE key = 'schema'"
+            ).fetchone()
+
+            if metadata_json:
+                existing_schema = json.loads(metadata_json[0])
+                existing_schema["tables"].append(schema["tables"][0])
+                _update_metadata(conn, "schema", json.dumps(existing_schema, ensure_ascii=False))
+
+            conn.commit()
+
+        except Exception as e:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    else:
+        # Create new database
+        create_database(database_name, schema)
+
+    # Insert data
+    conn = sqlite3.connect(db_path)
+    try:
+        placeholders = ", ".join(["?" for _ in csv_columns])
+        insert_sql = f"INSERT INTO {table_name} ({', '.join(csv_columns)}) VALUES ({placeholders})"
+
+        inserted_count = 0
+        error_count = 0
+        errors = []
+
+        for i, row in enumerate(rows, start=1):
+            try:
+                values = [row[col] if row[col].strip() else None for col in csv_columns]
+                conn.execute(insert_sql, values)
+                inserted_count += 1
+            except sqlite3.Error as e:
+                error_count += 1
+                errors.append(f"Row {i}: {e}")
+                if len(errors) <= 10:  # Limit error messages
+                    logger.warning(f"Failed to insert row {i}: {e}")
+
+        conn.commit()
+
+        logger.info(
+            f"CSV import completed: {inserted_count} inserted, {error_count} errors"
+        )
+
+        return {
+            "status": "success",
+            "database_name": database_name,
+            "table_name": table_name,
+            "total_rows": len(rows),
+            "inserted_rows": inserted_count,
+            "error_rows": error_count,
+            "errors": errors[:10],  # Return first 10 errors
+            "inferred_types": column_types
+        }
+
+    except Exception as e:
+        conn.rollback()
+        raise
     finally:
         conn.close()

@@ -104,7 +104,7 @@ create_database_tool(
 )
 ```
 
-## 提供ツール（全9種）
+## 提供ツール（全10種）
 
 | ツール名 | 用途 | 必須パラメータ |
 |---------|------|--------------|
@@ -113,6 +113,7 @@ create_database_tool(
 | `get_database_info_tool` | DB詳細情報を取得 | `database_name` |
 | `get_table_info_tool` | テーブル詳細とサンプルデータを取得 | `database_name`, `table_name` |
 | `create_database_tool` | 新規DB作成（メタデータ必須） | `database_name`, `schema` |
+| `create_table_from_csv_tool` | CSVから新規テーブル作成＋一括インポート | `database_name`, `table_name`, `csv_path`, `table_description`, `column_descriptions` |
 | `insert_data_tool` | データ挿入 | `database_name`, `table_name`, `data` |
 | `query_data_tool` | SELECT検索 | `database_name`, `sql_query` |
 | `get_schema_tool` | スキーマ取得（非推奨、`get_table_info_tool`推奨） | `database_name`, `table_name` |
@@ -144,7 +145,21 @@ AIの動作:
 4. 結果をユーザーに報告
 ```
 
-### シナリオ2: 既存DBの再利用
+### シナリオ2: CSVファイルからテーブル作成
+
+```
+ユーザー: 「このCSVファイルをデータベースにインポートして」
+
+AIの動作:
+1. CSVファイルのヘッダー行を確認
+2. 各カラムの説明文（5文字以上）を準備
+3. create_table_from_csv_tool で新規テーブル作成＋一括データ挿入
+   - データ型は自動推測（INTEGER, REAL, TEXT）
+   - PRIMARY KEYも指定可能
+4. get_table_info_tool でインポート結果を確認
+```
+
+### シナリオ3: 既存DBの再利用
 
 ```
 ユーザー: 「1週間前に作ったDBに追加データを入れて」

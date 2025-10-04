@@ -27,6 +27,7 @@ from db_operations import (
     get_table_schema,
     list_all_databases,
     delete_database,
+    create_table_from_csv,
     get_database_info,
     get_table_info,
 )
@@ -59,6 +60,7 @@ def get_usage_guide_tool() -> dict[str, Any]:
             "purpose": "AIエージェントがデータを自律的に蓄積・管理するためのデータベースサーバー",
             "key_features": [
                 "メタデータ必須のデータベース作成",
+                "CSVファイルからの一括インポート（型自動推測）",
                 "カラムごとの詳細な説明を保持",
                 "データベース・テーブル情報の詳細取得",
                 "セキュアなデータ挿入と検索",
@@ -126,6 +128,13 @@ def get_usage_guide_tool() -> dict[str, Any]:
                 "2. create_database_tool(database_name, schema) で作成",
                 "3. insert_data_tool() でデータ挿入",
                 "4. query_data_tool() でデータ確認"
+            ],
+            "CSVファイルからテーブルを作成する場合": [
+                "1. CSVファイルのヘッダー行を確認",
+                "2. 各カラムの説明文（5文字以上）を準備",
+                "3. create_table_from_csv_tool() で一括インポート",
+                "4. get_table_info_tool() でインポート結果を確認",
+                "注意: 既存テーブルへのインポートは不可、必ず新規テーブルが作成されます"
             ],
             "既存DBにデータを追加する場合": [
                 "1. list_databases_tool() でDB一覧確認",
@@ -447,6 +456,95 @@ def delete_database_tool(
         return delete_database(database_name, confirm)
     except Exception as e:
         logger.error(f"Error in delete_database_tool: {e}")
+        raise
+
+
+@mcp.tool()
+def create_table_from_csv_tool(
+    database_name: str,
+    table_name: str,
+    csv_path: str,
+    table_description: str,
+    column_descriptions: dict[str, str],
+    encoding: str = "utf-8",
+    primary_key_column: str | None = None
+) -> dict[str, Any]:
+    """
+    CSVファイルから新しいテーブルを作成し、データを一括インポートします。
+
+    このツールは、CSVファイルの各カラムのデータ型を自動判定し、テーブルを作成して
+    全データを一括挿入します。メタデータ必須ポリシーに従い、テーブルと各カラムの
+    説明文（5文字以上）が必要です。
+
+    **重要**: 既存テーブルへのインポートはできません。必ず新しいテーブルを作成します。
+
+    Args:
+        database_name: データベース名（拡張子.db不要）
+        table_name: 作成するテーブル名
+        csv_path: CSVファイルの絶対パス
+        table_description: テーブルの説明（5文字以上、必須）
+        column_descriptions: カラム名→説明文の辞書（各5文字以上、全カラム必須）
+        encoding: CSVファイルのエンコーディング（デフォルト: utf-8）
+        primary_key_column: PRIMARY KEYとして使用するカラム名（オプション）
+
+    Returns:
+        インポート結果を含む辞書:
+        - status: "success"
+        - database_name: データベース名
+        - table_name: テーブル名
+        - total_rows: CSV総行数
+        - inserted_rows: 挿入成功行数
+        - error_rows: エラー行数
+        - errors: エラーメッセージリスト（最大10件）
+        - inferred_types: 推測されたカラム型の辞書
+
+    Raises:
+        FileNotFoundError: CSVファイルが存在しない
+        ValueError: メタデータ不足、CSV形式エラー、テーブル重複
+        sqlite3.Error: データベース操作失敗
+
+    Example:
+        create_table_from_csv_tool(
+            database_name="sales_data",
+            table_name="monthly_sales",
+            csv_path="/path/to/sales.csv",
+            table_description="月次売上データを格納するテーブル",
+            column_descriptions={
+                "month": "売上月（YYYY-MM形式）",
+                "revenue": "売上金額（円）",
+                "customer_count": "顧客数"
+            },
+            primary_key_column="month"
+        )
+
+    Notes:
+        - データ型は自動推測されます（INTEGER, REAL, TEXT）
+        - 空文字列はNULLとして挿入されます
+        - エンコーディングエラー時は 'shift_jis' や 'cp932' を試してください
+        - 既存テーブルへのインポートが必要な場合は insert_data_tool を使用してください
+    """
+    try:
+        result = create_table_from_csv(
+            database_name=database_name,
+            table_name=table_name,
+            csv_path=csv_path,
+            table_description=table_description,
+            column_descriptions=column_descriptions,
+            encoding=encoding,
+            primary_key_column=primary_key_column
+        )
+        logger.info(
+            f"CSV import successful: {result['inserted_rows']}/{result['total_rows']} rows"
+        )
+        return result
+    except FileNotFoundError as e:
+        logger.error(f"CSV file not found: {e}")
+        raise
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Failed to import CSV: {e}")
         raise
 
 
