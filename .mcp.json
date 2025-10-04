@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "database-manager": {
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/Users/tskymmt/mcp/mcp-agent-external-memory",
+        "run",
+        "src/server.py"
+      ]
+    }
+  }
+}
