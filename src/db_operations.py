@@ -1007,3 +1007,90 @@ def create_table_from_csv(
         raise
     finally:
         conn.close()
+
+
+def export_table_to_csv(
+    database_name: str,
+    table_name: str,
+    csv_path: str,
+    encoding: str = "utf-8"
+) -> dict[str, Any]:
+    """
+    Export table data to CSV file.
+
+    Args:
+        database_name: Database name (without .db extension)
+        table_name: Table name to export
+        csv_path: Absolute path for output CSV file
+        encoding: CSV file encoding (default: utf-8)
+
+    Returns:
+        Dictionary with export status and statistics
+
+    Raises:
+        FileNotFoundError: Database not found
+        ValueError: Table not found or invalid path
+        PermissionError: Cannot write to specified path
+    """
+    db_path = _get_db_path(database_name)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {database_name}")
+
+    # Validate output path
+    output_path = Path(csv_path)
+    if output_path.exists():
+        raise ValueError(f"CSV file already exists: {csv_path}")
+
+    # Check parent directory exists and is writable
+    if not output_path.parent.exists():
+        raise ValueError(f"Parent directory does not exist: {output_path.parent}")
+
+    if not output_path.parent.is_dir():
+        raise ValueError(f"Parent path is not a directory: {output_path.parent}")
+
+    conn = sqlite3.connect(db_path)
+    try:
+        # Check table exists
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,)
+        )
+        if not cursor.fetchone():
+            raise ValueError(
+                f"Table '{table_name}' not found in database '{database_name}'"
+            )
+
+        # Get all data from table
+        cursor = conn.execute(f"SELECT * FROM {table_name}")
+        rows = cursor.fetchall()
+
+        if not rows:
+            logger.warning(f"Table '{table_name}' is empty")
+
+        # Get column names
+        column_names = [description[0] for description in cursor.description]
+
+        # Write to CSV
+        with open(output_path, 'w', encoding=encoding, newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(column_names)  # Header
+            writer.writerows(rows)  # Data
+
+        logger.info(
+            f"Exported {len(rows)} rows from {database_name}.{table_name} to {csv_path}"
+        )
+
+        return {
+            "status": "success",
+            "database_name": database_name,
+            "table_name": table_name,
+            "csv_path": str(output_path.absolute()),
+            "row_count": len(rows),
+            "column_count": len(column_names),
+            "columns": column_names
+        }
+
+    except PermissionError as e:
+        raise PermissionError(f"Cannot write to {csv_path}: {e}")
+    finally:
+        conn.close()

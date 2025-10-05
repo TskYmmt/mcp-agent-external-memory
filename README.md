@@ -104,7 +104,7 @@ create_database_tool(
 )
 ```
 
-## 提供ツール（全10種）
+## 提供ツール（全11種）
 
 | ツール名 | 用途 | 必須パラメータ |
 |---------|------|--------------|
@@ -114,6 +114,7 @@ create_database_tool(
 | `get_table_info_tool` | テーブル詳細とサンプルデータを取得 | `database_name`, `table_name` |
 | `create_database_tool` | 新規DB作成（メタデータ必須） | `database_name`, `schema` |
 | `create_table_from_csv_tool` | CSVから新規テーブル作成＋一括インポート | `database_name`, `table_name`, `csv_path`, `table_description`, `column_descriptions` |
+| `export_table_to_csv_tool` | テーブルデータをCSVにエクスポート | `database_name`, `table_name`, `csv_path` |
 | `insert_data_tool` | データ挿入 | `database_name`, `table_name`, `data` |
 | `query_data_tool` | SELECT検索 | `database_name`, `sql_query` |
 | `get_schema_tool` | スキーマ取得（非推奨、`get_table_info_tool`推奨） | `database_name`, `table_name` |

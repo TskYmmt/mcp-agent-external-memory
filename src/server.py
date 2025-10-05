@@ -28,6 +28,7 @@ from db_operations import (
     list_all_databases,
     delete_database,
     create_table_from_csv,
+    export_table_to_csv,
     get_database_info,
     get_table_info,
 )
@@ -456,6 +457,77 @@ def delete_database_tool(
         return delete_database(database_name, confirm)
     except Exception as e:
         logger.error(f"Error in delete_database_tool: {e}")
+        raise
+
+
+@mcp.tool()
+def export_table_to_csv_tool(
+    database_name: str,
+    table_name: str,
+    csv_path: str,
+    encoding: str = "utf-8"
+) -> dict[str, Any]:
+    """
+    テーブルのデータをCSVファイルにエクスポートします。
+
+    指定されたデータベースのテーブルから全データを取得し、CSVファイルとして出力します。
+    ヘッダー行にはカラム名が含まれます。
+
+    Args:
+        database_name: データベース名（拡張子.db不要）
+        table_name: エクスポートするテーブル名
+        csv_path: 出力先CSVファイルの絶対パス
+        encoding: CSVファイルのエンコーディング（デフォルト: utf-8）
+
+    Returns:
+        エクスポート結果を含む辞書:
+        - status: "success"
+        - database_name: データベース名
+        - table_name: テーブル名
+        - csv_path: 出力されたCSVファイルの絶対パス
+        - row_count: エクスポートされた行数
+        - column_count: カラム数
+        - columns: カラム名のリスト
+
+    Raises:
+        FileNotFoundError: データベースが存在しない
+        ValueError: テーブルが存在しない、またはファイルが既に存在する
+        PermissionError: 指定されたパスに書き込み権限がない
+
+    Example:
+        export_table_to_csv_tool(
+            database_name="sales_data",
+            table_name="monthly_sales",
+            csv_path="/path/to/export/sales_2025.csv"
+        )
+
+    Notes:
+        - 既存ファイルは上書きされません（エラーになります）
+        - 空のテーブルでもヘッダー行のみのCSVが作成されます
+        - エンコーディングエラー時は 'shift_jis' や 'cp932' を試してください
+    """
+    try:
+        result = export_table_to_csv(
+            database_name=database_name,
+            table_name=table_name,
+            csv_path=csv_path,
+            encoding=encoding
+        )
+        logger.info(
+            f"CSV export successful: {result['row_count']} rows to {csv_path}"
+        )
+        return result
+    except FileNotFoundError as e:
+        logger.error(f"Database not found: {e}")
+        raise
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        raise
+    except PermissionError as e:
+        logger.error(f"Permission error: {e}")
+        raise
+    except Exception as e:
+        logger.error(f"Failed to export CSV: {e}")
         raise
 
 
