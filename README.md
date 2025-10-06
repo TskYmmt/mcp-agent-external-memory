@@ -14,11 +14,10 @@
 - **情報階層ツール**: DB一覧 → DB詳細 → テーブル詳細と段階的に探索可能
 - **サンプルデータ表示**: テーブル情報取得時に実データ3件を自動表示
 
-### 🔒 セキュリティ
-- SQLインジェクション対策（パラメータ化クエリ）
-- SELECT文のみ許可（破壊的操作は制限）
+### 🔒 安全性
+- トランザクション管理（ロールバック対応）
 - ファイルシステム隔離（`databases/`ディレクトリ内のみ）
-- 削除時の2段階確認
+- データベース削除時の2段階確認
 
 ## クイックスタート
 
@@ -116,7 +115,7 @@ create_database_tool(
 | `create_table_from_csv_tool` | CSVから新規テーブル作成＋一括インポート | `database_name`, `table_name`, `csv_path`, `table_description`, `column_descriptions` |
 | `export_table_to_csv_tool` | テーブルデータをCSVにエクスポート | `database_name`, `table_name`, `csv_path` |
 | `insert_data_tool` | データ挿入 | `database_name`, `table_name`, `data` |
-| `query_data_tool` | SELECT検索 | `database_name`, `sql_query` |
+| `query_data_tool` | SQL実行（SELECT/UPDATE/DELETE/ALTER等） | `database_name`, `sql_query` |
 | `get_schema_tool` | スキーマ取得（非推奨、`get_table_info_tool`推奨） | `database_name`, `table_name` |
 | `delete_database_tool` | DB削除（2段階確認） | `database_name`, `confirm` |
 

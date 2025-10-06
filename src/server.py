@@ -344,26 +344,46 @@ def query_data_tool(
     sql_query: str
 ) -> dict[str, Any]:
     """
-    蓄積されたデータをSQL検索・分析します。
+    SQLクエリを実行してデータの検索・更新・削除・変更を行います。
 
-    SELECT文を使用してデータを柔軟に抽出・分析できます。
-    セキュリティのため、SELECT文のみが許可されています。
+    SELECT, UPDATE, DELETE, INSERT, ALTER TABLE など、すべてのSQL文を実行できます。
+    トランザクション管理により、データの整合性が保証されます。
 
     Args:
         database_name: 対象データベース名
-        sql_query: SELECT文によるクエリ
+        sql_query: 実行するSQLクエリ
 
     Returns:
-        カラム名、行データ、行数を含む辞書
+        - SELECT の場合: カラム名、行データ、行数を含む辞書
+        - UPDATE/DELETE/INSERT/ALTER の場合: 影響を受けた行数を含む辞書
 
     Raises:
         FileNotFoundError: データベースが存在しない場合
-        ValueError: SELECT以外のクエリを実行しようとした場合、またはクエリ構文エラー
+        ValueError: クエリ構文エラー
 
-    Example:
+    Examples:
+        # SELECT
         query_data_tool(
             database_name="customers_2025",
             sql_query="SELECT name, email FROM customers WHERE name LIKE '山田%'"
+        )
+
+        # UPDATE
+        query_data_tool(
+            database_name="customers_2025",
+            sql_query="UPDATE customers SET email = 'new@example.com' WHERE id = 1"
+        )
+
+        # DELETE
+        query_data_tool(
+            database_name="customers_2025",
+            sql_query="DELETE FROM customers WHERE id = 999"
+        )
+
+        # ALTER TABLE (カラム追加)
+        query_data_tool(
+            database_name="customers_2025",
+            sql_query="ALTER TABLE customers ADD COLUMN phone TEXT"
         )
     """
     try:

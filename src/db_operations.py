@@ -377,14 +377,6 @@ def query_data(
     if not db_path.exists():
         raise FileNotFoundError(f"Database '{database_name}' not found")
 
-    # Security: Only allow SELECT statements
-    query_upper = sql_query.strip().upper()
-    if not query_upper.startswith("SELECT"):
-        raise ValueError(
-            "Only SELECT queries are allowed. "
-            "DROP, DELETE, UPDATE operations are prohibited for safety."
-        )
-
     logger.info(f"Executing query on {database_name}: {sql_query}")
 
     conn = sqlite3.connect(db_path)
@@ -392,23 +384,41 @@ def query_data(
 
     try:
         cursor = conn.execute(sql_query)
-        rows = cursor.fetchall()
 
-        # Convert to list of dicts
-        result = []
-        columns = [description[0] for description in cursor.description] if cursor.description else []
+        # Check if this is a modifying query (UPDATE, DELETE, INSERT, ALTER)
+        query_upper = sql_query.strip().upper()
+        is_modifying = any(query_upper.startswith(cmd) for cmd in ['UPDATE', 'DELETE', 'INSERT', 'ALTER', 'DROP', 'CREATE'])
 
-        for row in rows:
-            result.append(dict(zip(columns, row)))
+        if is_modifying:
+            conn.commit()
+            affected_rows = cursor.rowcount
+            logger.info(f"Modified {affected_rows} rows")
 
-        return {
-            "status": "success",
-            "columns": columns,
-            "rows": result,
-            "row_count": len(result)
-        }
+            return {
+                "status": "success",
+                "affected_rows": affected_rows,
+                "message": f"Successfully executed. {affected_rows} rows affected."
+            }
+        else:
+            # SELECT query - return data
+            rows = cursor.fetchall()
+
+            # Convert to list of dicts
+            result = []
+            columns = [description[0] for description in cursor.description] if cursor.description else []
+
+            for row in rows:
+                result.append(dict(zip(columns, row)))
+
+            return {
+                "status": "success",
+                "columns": columns,
+                "rows": result,
+                "row_count": len(result)
+            }
 
     except Exception as e:
+        conn.rollback()
         logger.error(f"Query failed: {e}")
         raise ValueError(f"Query execution failed: {e}")
 
