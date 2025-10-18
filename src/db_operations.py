@@ -7,6 +7,7 @@ import sqlite3
 import json
 import logging
 import csv
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Any
@@ -18,6 +19,10 @@ logger = logging.getLogger(__name__)
 # Database directory (at project root)
 DB_DIR = Path(__file__).parent.parent / "databases"
 DB_DIR.mkdir(exist_ok=True)
+
+# Prepared statements cache
+# Format: {statement_id: {"conn": connection, "stmt": cursor, "db_path": path, "sql": sql}}
+_prepared_statements = {}
 
 
 def _get_db_path(database_name: str) -> Path:
@@ -494,8 +499,11 @@ def list_all_databases() -> dict[str, Any]:
 
             try:
                 # Get metadata
-                cursor = conn.execute("SELECT key, value FROM _metadata WHERE key IN ('description', 'tables')")
+                cursor = conn.execute(
+                    "SELECT key, value FROM _metadata"
+                )
                 metadata = dict(cursor.fetchall())
+                db_description = metadata.get("database_description", metadata.get("description", ""))
 
                 # Get all tables (excluding metadata and sqlite internal)
                 cursor = conn.execute(
@@ -514,7 +522,7 @@ def list_all_databases() -> dict[str, Any]:
                     "size_mb": round(stat.st_size / (1024 * 1024), 2),
                     "created_at": datetime.fromtimestamp(stat.st_ctime).isoformat(),
                     "updated_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                    "description": metadata.get("description", ""),
+                    "description": db_description,
                     "tables": tables,
                     "table_count": len(tables),
                     "total_records": total_records
@@ -659,6 +667,68 @@ def get_database_info(database_name: str) -> dict[str, Any]:
             except:
                 pass
 
+        # Get indices information
+        indices = []
+        for table in tables:
+            cursor = conn.execute(f"PRAGMA index_list({table})")
+            for idx in cursor.fetchall():
+                idx_name = idx[1]
+                is_unique = bool(idx[2])
+
+                # Get columns in this index
+                idx_cursor = conn.execute(f"PRAGMA index_info({idx_name})")
+                columns = [col[2] for col in idx_cursor.fetchall()]
+
+                indices.append({
+                    "index_name": idx_name,
+                    "table_name": table,
+                    "columns": columns,
+                    "unique": is_unique
+                })
+
+        # Get foreign keys information
+        foreign_keys = []
+        for table in tables:
+            cursor = conn.execute(f"PRAGMA foreign_key_list({table})")
+            for fk in cursor.fetchall():
+                foreign_keys.append({
+                    "table_name": table,
+                    "column": fk[3],
+                    "referenced_table": fk[2],
+                    "referenced_column": fk[4]
+                })
+
+        # Get views
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='view' ORDER BY name"
+        )
+        views = [row[0] for row in cursor.fetchall()]
+
+        # Get triggers
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' ORDER BY name"
+        )
+        triggers = [row[0] for row in cursor.fetchall()]
+
+        # Get PRAGMA information
+        pragma_info = {}
+        try:
+            cursor = conn.execute("PRAGMA page_size")
+            pragma_info["page_size"] = cursor.fetchone()[0]
+
+            cursor = conn.execute("PRAGMA cache_size")
+            pragma_info["cache_size"] = cursor.fetchone()[0]
+
+            cursor = conn.execute("PRAGMA journal_mode")
+            pragma_info["journal_mode"] = cursor.fetchone()[0]
+
+            cursor = conn.execute("PRAGMA synchronous")
+            sync_value = cursor.fetchone()[0]
+            sync_names = {0: "OFF", 1: "NORMAL", 2: "FULL", 3: "EXTRA"}
+            pragma_info["synchronous"] = sync_names.get(sync_value, str(sync_value))
+        except Exception as e:
+            logger.warning(f"Failed to get some PRAGMA info: {e}")
+
         return {
             "status": "success",
             "database_name": database_name,
@@ -669,7 +739,12 @@ def get_database_info(database_name: str) -> dict[str, Any]:
             "size_mb": round(db_path.stat().st_size / (1024 * 1024), 2),
             "created_at": datetime.fromtimestamp(db_path.stat().st_ctime).isoformat(),
             "updated_at": datetime.fromtimestamp(db_path.stat().st_mtime).isoformat(),
-            "schema": schema_info
+            "schema": schema_info,
+            "indices": indices,
+            "foreign_keys": foreign_keys,
+            "views": views,
+            "triggers": triggers,
+            "pragma_info": pragma_info
         }
 
     finally:
@@ -1102,5 +1177,714 @@ def export_table_to_csv(
 
     except PermissionError as e:
         raise PermissionError(f"Cannot write to {csv_path}: {e}")
+    finally:
+        conn.close()
+
+
+def execute_transaction(
+    database_name: str,
+    operations: list[dict[str, Any]],
+    isolation_level: str = "DEFERRED"
+) -> dict[str, Any]:
+    """
+    Execute multiple operations atomically within a transaction.
+
+    Args:
+        database_name: Target database name
+        operations: List of operations to execute
+            Each operation should have:
+            - type: "query" | "insert" | "update" | "delete"
+            - sql: SQL statement (for "query", "update", "delete")
+            - params: Parameters for SQL (optional)
+            - table_name: Table name (for "insert")
+            - data: Data to insert (for "insert")
+        isolation_level: Transaction isolation level ("DEFERRED", "IMMEDIATE", "EXCLUSIVE")
+
+    Returns:
+        Dict with transaction results
+
+    Raises:
+        FileNotFoundError: If database doesn't exist
+        ValueError: If operations are invalid
+    """
+    db_path = _get_db_path(database_name)
+
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database '{database_name}' not found")
+
+    # Validate isolation level
+    if isolation_level not in ["DEFERRED", "IMMEDIATE", "EXCLUSIVE"]:
+        raise ValueError(
+            f"Invalid isolation_level: {isolation_level}. "
+            f"Must be one of: DEFERRED, IMMEDIATE, EXCLUSIVE"
+        )
+
+    if not operations or not isinstance(operations, list):
+        raise ValueError("operations must be a non-empty list")
+
+    transaction_id = str(uuid.uuid4())
+    logger.info(f"Starting transaction {transaction_id} with {len(operations)} operations")
+
+    conn = sqlite3.connect(db_path)
+    # Set isolation level
+    conn.isolation_level = isolation_level
+
+    results = []
+    rollback_performed = False
+    operations_executed = 0
+
+    try:
+        # Begin transaction explicitly
+        conn.execute("BEGIN")
+
+        for i, op in enumerate(operations):
+            op_type = op.get("type")
+
+            if not op_type:
+                raise ValueError(f"Operation {i}: missing 'type' field")
+
+            try:
+                if op_type == "query":
+                    # Execute raw SQL query
+                    sql = op.get("sql")
+                    params = op.get("params", [])
+
+                    if not sql:
+                        raise ValueError(f"Operation {i}: 'sql' field required for type 'query'")
+
+                    cursor = conn.execute(sql, params)
+
+                    # Check if modifying query
+                    query_upper = sql.strip().upper()
+                    is_modifying = any(
+                        query_upper.startswith(cmd)
+                        for cmd in ['UPDATE', 'DELETE', 'INSERT', 'ALTER', 'DROP', 'CREATE']
+                    )
+
+                    if is_modifying:
+                        result_data = {"affected_rows": cursor.rowcount}
+                    else:
+                        # SELECT query
+                        rows = cursor.fetchall()
+                        columns = [desc[0] for desc in cursor.description] if cursor.description else []
+                        result_data = {
+                            "columns": columns,
+                            "rows": [dict(zip(columns, row)) for row in rows],
+                            "row_count": len(rows)
+                        }
+
+                    results.append({
+                        "operation_index": i,
+                        "status": "success",
+                        "result": result_data
+                    })
+
+                elif op_type == "insert":
+                    # Insert data using existing insert logic
+                    table_name = op.get("table_name")
+                    data = op.get("data")
+
+                    if not table_name:
+                        raise ValueError(f"Operation {i}: 'table_name' required for type 'insert'")
+                    if not data:
+                        raise ValueError(f"Operation {i}: 'data' required for type 'insert'")
+
+                    # Normalize data to list
+                    if isinstance(data, dict):
+                        data = [data]
+
+                    columns = list(data[0].keys())
+                    placeholders = ', '.join(['?' for _ in columns])
+                    column_names = ', '.join(columns)
+
+                    insert_sql = f"INSERT INTO {table_name} ({column_names}) VALUES ({placeholders})"
+
+                    rows_inserted = 0
+                    for row in data:
+                        values = [row[col] for col in columns]
+                        conn.execute(insert_sql, values)
+                        rows_inserted += 1
+
+                    results.append({
+                        "operation_index": i,
+                        "status": "success",
+                        "result": {"rows_inserted": rows_inserted}
+                    })
+
+                elif op_type in ["update", "delete"]:
+                    # Execute update or delete
+                    sql = op.get("sql")
+                    params = op.get("params", [])
+
+                    if not sql:
+                        raise ValueError(f"Operation {i}: 'sql' field required for type '{op_type}'")
+
+                    cursor = conn.execute(sql, params)
+
+                    results.append({
+                        "operation_index": i,
+                        "status": "success",
+                        "result": {"affected_rows": cursor.rowcount}
+                    })
+
+                else:
+                    raise ValueError(
+                        f"Operation {i}: invalid type '{op_type}'. "
+                        f"Must be one of: query, insert, update, delete"
+                    )
+
+                operations_executed += 1
+
+            except Exception as e:
+                # Operation failed - record error and raise to trigger rollback
+                logger.error(f"Transaction {transaction_id}: Operation {i} failed: {e}")
+                results.append({
+                    "operation_index": i,
+                    "status": "failed",
+                    "error": str(e)
+                })
+                raise
+
+        # All operations succeeded - commit
+        conn.commit()
+        logger.info(f"Transaction {transaction_id}: committed successfully")
+
+        return {
+            "status": "success",
+            "transaction_id": transaction_id,
+            "operations_executed": operations_executed,
+            "results": results,
+            "rollback_performed": False
+        }
+
+    except Exception as e:
+        # Rollback on any error
+        conn.rollback()
+        rollback_performed = True
+        logger.warning(f"Transaction {transaction_id}: rolled back due to error")
+
+        return {
+            "status": "failed",
+            "transaction_id": transaction_id,
+            "operations_executed": operations_executed,
+            "results": results,
+            "rollback_performed": True,
+            "error_message": str(e)
+        }
+
+    finally:
+        conn.close()
+
+
+def bulk_insert_optimized(
+    database_name: str,
+    table_name: str,
+    records: list[dict[str, Any]],
+    batch_size: int = 1000,
+    use_transaction: bool = True
+) -> dict[str, Any]:
+    """
+    Efficiently insert large amounts of data using batched transactions.
+
+    Args:
+        database_name: Target database name
+        table_name: Target table name
+        records: List of records to insert
+        batch_size: Number of records per batch (default: 1000)
+        use_transaction: Use transaction for each batch (default: True)
+
+    Returns:
+        Dict with insertion statistics
+
+    Raises:
+        FileNotFoundError: If database doesn't exist
+        ValueError: If records are invalid
+    """
+    import time
+
+    db_path = _get_db_path(database_name)
+
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database '{database_name}' not found")
+
+    if not records or not isinstance(records, list):
+        raise ValueError("records must be a non-empty list")
+
+    if batch_size <= 0:
+        raise ValueError("batch_size must be greater than 0")
+
+    # Validate columns
+    first_record_columns = list(records[0].keys())
+    expected_columns = set(first_record_columns)
+    if not expected_columns:
+        raise ValueError("Records must contain at least one column")
+
+    for idx, record in enumerate(records):
+        if set(record.keys()) != expected_columns:
+            raise ValueError(
+                f"Record at index {idx} does not match the expected columns. Expected: {sorted(expected_columns)}, "
+                f"Got: {sorted(record.keys())}"
+            )
+
+    total_records = len(records)
+    logger.info(
+        f"Starting bulk insert: {total_records} records into {table_name}, "
+        f"batch_size={batch_size}, use_transaction={use_transaction}"
+    )
+
+    start_time = time.time()
+    conn = sqlite3.connect(db_path)
+
+    try:
+        columns = first_record_columns.copy()
+        placeholders = ', '.join(['?' for _ in columns])
+        column_names = ', '.join(columns)
+        insert_sql = f"INSERT INTO {table_name} ({column_names}) VALUES ({placeholders})"
+
+        # Prepare statement once
+        cursor = conn.cursor()
+
+        inserted_count = 0
+        error_details: list[dict[str, Any]] = []
+        batches_processed = 0
+        MAX_ERROR_DETAILS = 50
+
+        # Process in batches
+        for batch_start in range(0, total_records, batch_size):
+            batch_end = min(batch_start + batch_size, total_records)
+            batch = records[batch_start:batch_end]
+            batches_processed += 1
+            batch_inserted = False
+
+            try:
+                if use_transaction:
+                    conn.execute("BEGIN")
+
+                for record in batch:
+                    values = [record[col] for col in columns]
+                    cursor.execute(insert_sql, values)
+
+                if use_transaction:
+                    conn.commit()
+
+                inserted_count += len(batch)
+                batch_inserted = True
+
+                if batches_processed % 10 == 0:
+                    logger.info(
+                        f"Progress: {batches_processed} batches, {inserted_count}/{total_records} records"
+                    )
+
+            except Exception as e:
+                logger.warning(f"Batch {batches_processed} requires fallback due to error: {e}")
+                if use_transaction:
+                    try:
+                        conn.rollback()
+                    except sqlite3.Error:
+                        pass
+
+            if batch_inserted:
+                continue
+
+            # Fallback: process records individually to capture granular errors
+            for offset, record in enumerate(batch):
+                record_index = batch_start + offset
+                transaction_open = False
+
+                try:
+                    if use_transaction:
+                        conn.execute("BEGIN")
+                        transaction_open = True
+
+                    values = [record[col] for col in columns]
+                    cursor.execute(insert_sql, values)
+
+                    if use_transaction and transaction_open:
+                        conn.commit()
+
+                    inserted_count += 1
+
+                except Exception as record_error:
+                    if use_transaction and transaction_open:
+                        try:
+                            conn.rollback()
+                        except sqlite3.Error:
+                            pass
+
+                    if len(error_details) < MAX_ERROR_DETAILS:
+                        error_details.append({
+                            "record_index": record_index,
+                            "error_message": str(record_error)
+                        })
+
+                    logger.warning(
+                        f"Failed to insert record at index {record_index}: {record_error}"
+                    )
+
+                finally:
+                    if not use_transaction:
+                        try:
+                            conn.commit()
+                        except sqlite3.Error:
+                            # Autocommit mode might not require explicit commit
+                            pass
+
+        end_time = time.time()
+        execution_time_ms = int((end_time - start_time) * 1000)
+
+        logger.info(
+            f"Bulk insert completed: {inserted_count}/{total_records} records inserted, "
+            f"{batches_processed} batches, {execution_time_ms}ms"
+        )
+
+        failed_records = total_records - inserted_count
+
+        # Determine overall status
+        if failed_records == 0:
+            status = "success"
+        elif inserted_count > 0:
+            status = "partial_success"
+        else:
+            status = "failed"
+
+        return {
+            "status": status,
+            "total_records": total_records,
+            "inserted_records": inserted_count,
+            "failed_records": failed_records,
+            "batches_processed": batches_processed,
+            "execution_time_ms": execution_time_ms,
+            "errors": error_details
+        }
+
+    finally:
+        conn.close()
+
+
+def prepare_statement(
+    database_name: str,
+    statement_id: str,
+    sql: str
+) -> dict[str, Any]:
+    """
+    Prepare a SQL statement for repeated execution.
+
+    Args:
+        database_name: Target database name
+        statement_id: Unique identifier for this prepared statement
+        sql: SQL statement with placeholders (?)
+
+    Returns:
+        Dict with status and statement info
+
+    Raises:
+        FileNotFoundError: If database doesn't exist
+        ValueError: If statement_id already exists or SQL is invalid
+    """
+    db_path = _get_db_path(database_name)
+
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database '{database_name}' not found")
+
+    if statement_id in _prepared_statements:
+        raise ValueError(
+            f"Statement ID '{statement_id}' already exists. "
+            f"Use a different ID or close the existing statement first."
+        )
+
+    if not sql or not isinstance(sql, str):
+        raise ValueError("sql must be a non-empty string")
+
+    # Count placeholders
+    parameter_count = sql.count('?')
+
+    # Create persistent connection and cursor
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # Store prepared statement
+    _prepared_statements[statement_id] = {
+        "conn": conn,
+        "cursor": cursor,
+        "db_path": str(db_path),
+        "sql": sql,
+        "database_name": database_name
+    }
+
+    logger.info(
+        f"Prepared statement '{statement_id}': {parameter_count} parameters, "
+        f"database: {database_name}"
+    )
+
+    return {
+        "status": "success",
+        "statement_id": statement_id,
+        "parameter_count": parameter_count,
+        "database_name": database_name,
+        "sql": sql
+    }
+
+
+def execute_prepared(
+    database_name: str,
+    statement_id: str,
+    params: list[Any]
+) -> dict[str, Any]:
+    """
+    Execute a prepared statement with parameters.
+
+    Args:
+        database_name: Target database name
+        statement_id: Prepared statement identifier
+        params: Parameters for the SQL statement
+
+    Returns:
+        Dict with execution results
+
+    Raises:
+        ValueError: If statement doesn't exist or parameters are invalid
+    """
+    if statement_id not in _prepared_statements:
+        raise ValueError(
+            f"Statement ID '{statement_id}' not found. "
+            f"Use prepare_statement first."
+        )
+
+    stmt_info = _prepared_statements[statement_id]
+
+    # Validate database name matches
+    if stmt_info["database_name"] != database_name:
+        raise ValueError(
+            f"Database mismatch: statement was prepared for '{stmt_info['database_name']}', "
+            f"but execution requested for '{database_name}'"
+        )
+
+    cursor = stmt_info["cursor"]
+    sql = stmt_info["sql"]
+
+    # Validate parameter count
+    expected_count = sql.count('?')
+    if len(params) != expected_count:
+        raise ValueError(
+            f"Parameter count mismatch: expected {expected_count}, got {len(params)}"
+        )
+
+    try:
+        cursor.execute(sql, params)
+
+        # Check if modifying query
+        query_upper = sql.strip().upper()
+        is_modifying = any(
+            query_upper.startswith(cmd)
+            for cmd in ['UPDATE', 'DELETE', 'INSERT', 'ALTER', 'DROP', 'CREATE']
+        )
+
+        if is_modifying:
+            stmt_info["conn"].commit()
+            return {
+                "status": "success",
+                "statement_id": statement_id,
+                "affected_rows": cursor.rowcount
+            }
+        else:
+            # SELECT query
+            rows = cursor.fetchall()
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+
+            return {
+                "status": "success",
+                "statement_id": statement_id,
+                "columns": columns,
+                "rows": [dict(zip(columns, row)) for row in rows],
+                "row_count": len(rows)
+            }
+
+    except Exception as e:
+        stmt_info["conn"].rollback()
+        logger.error(f"Failed to execute prepared statement '{statement_id}': {e}")
+        raise ValueError(f"Execution failed: {e}")
+
+
+def close_prepared(
+    database_name: str,
+    statement_id: str
+) -> dict[str, Any]:
+    """
+    Close a prepared statement and release resources.
+
+    Args:
+        database_name: Target database name
+        statement_id: Prepared statement identifier
+
+    Returns:
+        Dict with status
+
+    Raises:
+        ValueError: If statement doesn't exist
+    """
+    if statement_id not in _prepared_statements:
+        raise ValueError(f"Statement ID '{statement_id}' not found")
+
+    stmt_info = _prepared_statements[statement_id]
+
+    # Validate database name matches
+    if stmt_info["database_name"] != database_name:
+        raise ValueError(
+            f"Database mismatch: statement was prepared for '{stmt_info['database_name']}', "
+            f"but close requested for '{database_name}'"
+        )
+
+    # Close cursor and connection
+    stmt_info["cursor"].close()
+    stmt_info["conn"].close()
+
+    # Remove from cache
+    del _prepared_statements[statement_id]
+
+    logger.info(f"Closed prepared statement '{statement_id}'")
+
+    return {
+        "status": "success",
+        "statement_id": statement_id,
+        "message": f"Prepared statement '{statement_id}' closed successfully"
+    }
+
+
+def execute_batch_queries(
+    database_name: str,
+    queries: list[dict[str, Any]],
+    fail_fast: bool = False
+) -> dict[str, Any]:
+    """
+    Execute multiple queries efficiently.
+
+    Args:
+        database_name: Target database name
+        queries: List of queries to execute
+            Each query should have:
+            - query_id: Unique identifier for this query
+            - sql: SQL statement
+            - params: Parameters (optional)
+        fail_fast: Stop immediately on first failure (default: False)
+
+    Returns:
+        Dict with batch execution results
+
+    Raises:
+        FileNotFoundError: If database doesn't exist
+        ValueError: If queries are invalid
+    """
+    import time
+
+    db_path = _get_db_path(database_name)
+
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database '{database_name}' not found")
+
+    if not queries or not isinstance(queries, list):
+        raise ValueError("queries must be a non-empty list")
+
+    total_queries = len(queries)
+    logger.info(f"Starting batch query execution: {total_queries} queries, fail_fast={fail_fast}")
+
+    start_time = time.time()
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    results = {}
+    successful_count = 0
+    failed_count = 0
+
+    try:
+        for query_spec in queries:
+            query_id = query_spec.get("query_id")
+            sql = query_spec.get("sql")
+            params = query_spec.get("params", [])
+
+            if not query_id:
+                raise ValueError("Each query must have a 'query_id' field")
+
+            if not sql:
+                results[query_id] = {
+                    "status": "failed",
+                    "error": "Missing 'sql' field"
+                }
+                failed_count += 1
+
+                if fail_fast:
+                    logger.error(f"Batch query failed (fail_fast=True): query_id={query_id}")
+                    break
+                continue
+
+            try:
+                cursor = conn.execute(sql, params)
+
+                # Check if modifying query
+                query_upper = sql.strip().upper()
+                is_modifying = any(
+                    query_upper.startswith(cmd)
+                    for cmd in ['UPDATE', 'DELETE', 'INSERT', 'ALTER', 'DROP', 'CREATE']
+                )
+
+                if is_modifying:
+                    conn.commit()
+                    results[query_id] = {
+                        "status": "success",
+                        "data": {"affected_rows": cursor.rowcount}
+                    }
+                else:
+                    # SELECT query
+                    rows = cursor.fetchall()
+                    columns = [desc[0] for desc in cursor.description] if cursor.description else []
+
+                    results[query_id] = {
+                        "status": "success",
+                        "data": {
+                            "columns": columns,
+                            "rows": [dict(row) for row in rows],
+                            "row_count": len(rows)
+                        }
+                    }
+
+                successful_count += 1
+
+            except Exception as e:
+                error_msg = str(e)
+                results[query_id] = {
+                    "status": "failed",
+                    "error": error_msg
+                }
+                failed_count += 1
+                logger.warning(f"Query '{query_id}' failed: {error_msg}")
+
+                if fail_fast:
+                    logger.error(f"Batch query stopped (fail_fast=True): query_id={query_id}")
+                    break
+
+        end_time = time.time()
+        execution_time_ms = int((end_time - start_time) * 1000)
+
+        # Determine overall status
+        if failed_count == 0:
+            status = "success"
+        elif successful_count > 0:
+            status = "partial_success"
+        else:
+            status = "failed"
+
+        logger.info(
+            f"Batch query completed: {successful_count} succeeded, {failed_count} failed, "
+            f"{execution_time_ms}ms"
+        )
+
+        return {
+            "status": status,
+            "results": results,
+            "total_queries": total_queries,
+            "successful_queries": successful_count,
+            "failed_queries": failed_count,
+            "execution_time_ms": execution_time_ms
+        }
+
     finally:
         conn.close()

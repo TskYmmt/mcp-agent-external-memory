@@ -9,6 +9,13 @@
 - **セルフドキュメンティング**: 全ツールに詳細な日本語説明、使用例、エラーガイド付き
 - **メタデータ必須**: データベース/テーブル/カラムすべてに説明が必須（5文字以上）
 
+### 🧰 汎用DBオペレーション強化（v2）
+- **トランザクションAPI**: `execute_transaction_tool` で複数操作をアトミックに実行
+- **バルク挿入最適化**: `bulk_insert_optimized_tool` で大量データを高速に投入
+- **Prepared Statement管理**: `prepare_statement_tool` 系列で繰り返しクエリを高速化
+- **バッチクエリ実行**: `execute_batch_queries_tool` で複数SELECTを一括処理
+- **DBメタ情報拡張**: `get_database_info_tool` がインデックス・外部キー・PRAGMAを返却
+
 ### 🔍 発見可能性
 - **使い方ガイドツール**: `get_usage_guide_tool` で全体像を即座に把握
 - **情報階層ツール**: DB一覧 → DB詳細 → テーブル詳細と段階的に探索可能
@@ -103,20 +110,26 @@ create_database_tool(
 )
 ```
 
-## 提供ツール（全11種）
+## 提供ツール（全16種）
 
 | ツール名 | 用途 | 必須パラメータ |
 |---------|------|--------------|
 | `get_usage_guide_tool` | 使い方ガイドを取得 | なし |
 | `list_databases_tool` | DB一覧を取得 | なし |
-| `get_database_info_tool` | DB詳細情報を取得 | `database_name` |
+| `get_database_info_tool` | DB詳細情報・インデックス・PRAGMAを取得 | `database_name` |
 | `get_table_info_tool` | テーブル詳細とサンプルデータを取得 | `database_name`, `table_name` |
 | `create_database_tool` | 新規DB作成（メタデータ必須） | `database_name`, `schema` |
 | `create_table_from_csv_tool` | CSVから新規テーブル作成＋一括インポート | `database_name`, `table_name`, `csv_path`, `table_description`, `column_descriptions` |
 | `export_table_to_csv_tool` | テーブルデータをCSVにエクスポート | `database_name`, `table_name`, `csv_path` |
 | `insert_data_tool` | データ挿入 | `database_name`, `table_name`, `data` |
 | `query_data_tool` | SQL実行（SELECT/UPDATE/DELETE/ALTER等） | `database_name`, `sql_query` |
-| `get_schema_tool` | スキーマ取得（非推奨、`get_table_info_tool`推奨） | `database_name`, `table_name` |
+| `execute_transaction_tool` | 複数操作をアトミックに実行 | `database_name`, `operations` |
+| `bulk_insert_optimized_tool` | 大量データをバッチ挿入 | `database_name`, `table_name`, `records` |
+| `prepare_statement_tool` | Prepared Statementを作成 | `database_name`, `statement_id`, `sql` |
+| `execute_prepared_tool` | Prepared Statementを実行 | `database_name`, `statement_id`, `params` |
+| `close_prepared_tool` | Prepared Statementをクローズ | `database_name`, `statement_id` |
+| `execute_batch_queries_tool` | 複数クエリを一括実行 | `database_name`, `queries` |
+| `get_schema_tool` | スキーマ取得（互換目的） | `database_name`, `table_name` |
 | `delete_database_tool` | DB削除（2段階確認） | `database_name`, `confirm` |
 
 ## メタデータ必須ポリシー
@@ -187,6 +200,17 @@ AIの動作:
 - "サンプルデータ表示が実用的。説明だけでなく実例で理解できる"
 
 詳細: [`tests/validation/MCP_TEST_REQUEST_COMPLETED.md`](tests/validation/MCP_TEST_REQUEST_COMPLETED.md)
+
+## 新しいスモークテスト
+
+`tests/test_server.py` を実行すると、トランザクション/バルク挿入/Prepared Statement/バッチクエリなど
+v2で追加された汎用機能を含む包括的なスモークテストが走ります。
+
+```bash
+uv run python tests/test_server.py
+```
+
+全テストが成功すると、各機能の実行ログと結果がコンソールに表示されます。
 
 ## ディレクトリ構成
 

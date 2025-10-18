@@ -31,6 +31,12 @@ from db_operations import (
     export_table_to_csv,
     get_database_info,
     get_table_info,
+    execute_transaction,
+    bulk_insert_optimized,
+    prepare_statement,
+    execute_prepared,
+    close_prepared,
+    execute_batch_queries,
 )
 
 # Configure logging
@@ -223,9 +229,10 @@ def create_database_tool(
 @mcp.tool()
 def get_database_info_tool(database_name: str) -> dict[str, Any]:
     """
-    データベースの詳細情報を取得します。
+    データベースの詳細情報を取得します（拡張版）。
 
-    データベースの説明、含まれるテーブル、レコード数、作成日時などの
+    データベースの説明、含まれるテーブル、レコード数、作成日時に加えて、
+    インデックス、外部キー、ビュー、トリガー、PRAGMA設定などの
     包括的な情報を取得できます。
 
     Args:
@@ -242,6 +249,11 @@ def get_database_info_tool(database_name: str) -> dict[str, Any]:
             - created_at: 作成日時
             - updated_at: 最終更新日時
             - schema: 完全なスキーマ情報（利用可能な場合）
+            - indices: インデックス情報（テーブル名、カラム、ユニーク制約）
+            - foreign_keys: 外部キー制約情報
+            - views: ビュー一覧
+            - triggers: トリガー一覧
+            - pragma_info: PRAGMA設定（page_size, cache_size, journal_mode, synchronous）
 
     Raises:
         FileNotFoundError: データベースが存在しない場合
@@ -637,6 +649,424 @@ def create_table_from_csv_tool(
         raise
     except Exception as e:
         logger.error(f"Failed to import CSV: {e}")
+        raise
+
+
+@mcp.tool()
+def execute_transaction_tool(
+    database_name: str,
+    operations: list[dict[str, Any]],
+    isolation_level: str = "DEFERRED"
+) -> dict[str, Any]:
+    """
+    複数の操作をアトミックに実行します（トランザクション管理）。
+
+    複数のデータベース操作を単一のトランザクション内で実行し、
+    すべての操作が成功した場合のみコミットします。
+    1つでも失敗した場合は全ての変更がロールバックされます。
+
+    Args:
+        database_name: 対象データベース名
+        operations: 実行する操作のリスト
+            各操作は以下の形式:
+            - type: "query" | "insert" | "update" | "delete"
+            - sql: SQL文（type="query"、"update"、"delete"の場合）
+            - params: SQLパラメータ（オプション）
+            - table_name: テーブル名（type="insert"の場合）
+            - data: 挿入データ（type="insert"の場合）
+        isolation_level: トランザクション分離レベル
+            "DEFERRED"（デフォルト）、"IMMEDIATE"、"EXCLUSIVE"のいずれか
+
+    Returns:
+        トランザクション結果を含む辞書:
+        - status: "success" | "failed"
+        - transaction_id: トランザクション識別子
+        - operations_executed: 実行された操作数
+        - results: 各操作の結果配列
+        - rollback_performed: ロールバックが実行されたか
+        - error_message: エラーメッセージ（失敗時）
+
+    Raises:
+        FileNotFoundError: データベースが存在しない場合
+        ValueError: 操作が不正な場合
+
+    Examples:
+        # 複数テーブルへの挿入とクエリを1トランザクションで実行
+        execute_transaction_tool(
+            database_name="sales_data",
+            operations=[
+                {
+                    "type": "insert",
+                    "table_name": "orders",
+                    "data": {"order_id": 1001, "customer_id": 5, "amount": 15000}
+                },
+                {
+                    "type": "query",
+                    "sql": "UPDATE customers SET last_order_date = ? WHERE customer_id = ?",
+                    "params": ["2025-10-18", 5]
+                },
+                {
+                    "type": "query",
+                    "sql": "INSERT INTO order_history (order_id, status) VALUES (?, ?)",
+                    "params": [1001, "created"]
+                }
+            ]
+        )
+
+        # クエリと更新を組み合わせた複雑な操作
+        execute_transaction_tool(
+            database_name="inventory",
+            operations=[
+                {
+                    "type": "query",
+                    "sql": "SELECT stock FROM products WHERE product_id = ?",
+                    "params": [101]
+                },
+                {
+                    "type": "update",
+                    "sql": "UPDATE products SET stock = stock - ? WHERE product_id = ?",
+                    "params": [5, 101]
+                }
+            ],
+            isolation_level="IMMEDIATE"
+        )
+
+    Notes:
+        - すべての操作は順番に実行されます
+        - 1つでも失敗すると全てロールバックされます
+        - データの整合性が自動的に保証されます
+        - 複雑なビジネスロジックの実装に最適です
+    """
+    try:
+        return execute_transaction(
+            database_name=database_name,
+            operations=operations,
+            isolation_level=isolation_level
+        )
+    except Exception as e:
+        logger.error(f"Error in execute_transaction_tool: {e}")
+        raise
+
+
+@mcp.tool()
+def bulk_insert_optimized_tool(
+    database_name: str,
+    table_name: str,
+    records: list[dict[str, Any]],
+    batch_size: int = 1000,
+    use_transaction: bool = True
+) -> dict[str, Any]:
+    """
+    大量のレコードを効率的に挿入します（バッチ処理最適化）。
+
+    バッチ処理とトランザクション管理により、大量データの挿入を
+    高速かつメモリ効率良く実行します。
+
+    Args:
+        database_name: 対象データベース名
+        table_name: 対象テーブル名
+        records: 挿入するレコードのリスト（辞書の配列）
+        batch_size: バッチサイズ（デフォルト: 1000）
+            1トランザクションで挿入するレコード数
+        use_transaction: トランザクション使用（デフォルト: true）
+            各バッチをトランザクション内で実行するか
+
+    Returns:
+        挿入結果を含む辞書:
+        - status: "success" | "partial_success" | "failed"
+        - total_records: 総レコード数
+        - inserted_records: 挿入成功レコード数
+        - failed_records: 失敗レコード数
+        - batches_processed: 処理バッチ数
+        - execution_time_ms: 実行時間（ミリ秒）
+        - errors: エラーメッセージリスト（最大10件）
+
+    Raises:
+        FileNotFoundError: データベースが存在しない場合
+        ValueError: レコードが不正な場合
+
+    Examples:
+        # 10,000件のレコードを効率的に挿入
+        bulk_insert_optimized_tool(
+            database_name="sales_data",
+            table_name="transactions",
+            records=[
+                {"transaction_id": 1, "amount": 1500, "customer_id": 101},
+                {"transaction_id": 2, "amount": 2500, "customer_id": 102},
+                # ... 9,998件
+            ],
+            batch_size=1000
+        )
+
+        # 小さいバッチサイズで挿入（メモリ制約がある場合）
+        bulk_insert_optimized_tool(
+            database_name="large_dataset",
+            table_name="measurements",
+            records=measurement_data,  # 100万件
+            batch_size=500,
+            use_transaction=True
+        )
+
+    Notes:
+        - 通常の insert_data_tool より高速
+        - 大量データでもメモリ効率が良い
+        - 進捗ログが10バッチごとに出力される
+        - エラーが発生しても処理を継続する
+        - 全レコードが同じカラム構造である必要がある
+    """
+    try:
+        result = bulk_insert_optimized(
+            database_name=database_name,
+            table_name=table_name,
+            records=records,
+            batch_size=batch_size,
+            use_transaction=use_transaction
+        )
+        logger.info(
+            f"Bulk insert completed: {result['inserted_records']}/{result['total_records']} "
+            f"in {result['execution_time_ms']}ms"
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Error in bulk_insert_optimized_tool: {e}")
+        raise
+
+
+@mcp.tool()
+def prepare_statement_tool(
+    database_name: str,
+    statement_id: str,
+    sql: str
+) -> dict[str, Any]:
+    """
+    SQL文を事前準備し、繰り返し実行できるようにします（Prepared Statement）。
+
+    同じクエリを異なるパラメータで繰り返し実行する場合、
+    Prepared Statementを使うことで実行速度が大幅に向上します。
+
+    Args:
+        database_name: 対象データベース名
+        statement_id: この準備文の識別子（一意である必要があります）
+        sql: プレースホルダ（?）を含むSQL文
+
+    Returns:
+        準備文の情報を含む辞書:
+        - status: "success"
+        - statement_id: ステートメント識別子
+        - parameter_count: プレースホルダ数
+        - database_name: データベース名
+        - sql: SQL文
+
+    Raises:
+        FileNotFoundError: データベースが存在しない場合
+        ValueError: statement_idが既に存在する場合、またはSQLが不正な場合
+
+    Example:
+        # Prepared Statementを作成
+        prepare_statement_tool(
+            database_name="sales_data",
+            statement_id="update_stock",
+            sql="UPDATE products SET stock = stock - ? WHERE product_id = ? AND stock >= ?"
+        )
+
+    Notes:
+        - プレースホルダには ? を使用します
+        - 作成後は execute_prepared_tool で繰り返し実行できます
+        - 使い終わったら close_prepared_tool でリソースを解放してください
+        - 同じstatement_idは使用中は再利用できません
+    """
+    try:
+        return prepare_statement(
+            database_name=database_name,
+            statement_id=statement_id,
+            sql=sql
+        )
+    except Exception as e:
+        logger.error(f"Error in prepare_statement_tool: {e}")
+        raise
+
+
+@mcp.tool()
+def execute_prepared_tool(
+    database_name: str,
+    statement_id: str,
+    params: list[Any]
+) -> dict[str, Any]:
+    """
+    事前準備したSQL文をパラメータ付きで実行します。
+
+    prepare_statement_tool で準備したSQL文を、
+    異なるパラメータで高速に繰り返し実行できます。
+
+    Args:
+        database_name: 対象データベース名
+        statement_id: 準備文の識別子
+        params: SQLパラメータのリスト
+
+    Returns:
+        実行結果を含む辞書:
+        - status: "success"
+        - statement_id: ステートメント識別子
+        - affected_rows: 影響を受けた行数（UPDATE/DELETE/INSERTの場合）
+        - または columns, rows, row_count（SELECTの場合）
+
+    Raises:
+        ValueError: ステートメントが存在しない、またはパラメータ数が一致しない場合
+
+    Example:
+        # Prepared Statementを繰り返し実行
+        for product_id, quantity in sales_list:
+            execute_prepared_tool(
+                database_name="sales_data",
+                statement_id="update_stock",
+                params=[quantity, product_id, quantity]
+            )
+
+    Notes:
+        - パラメータ数は準備時のプレースホルダ数と一致する必要があります
+        - UPDATEやDELETEは自動的にコミットされます
+        - 高速実行のため、同じクエリを何度も実行する場合に最適です
+    """
+    try:
+        return execute_prepared(
+            database_name=database_name,
+            statement_id=statement_id,
+            params=params
+        )
+    except Exception as e:
+        logger.error(f"Error in execute_prepared_tool: {e}")
+        raise
+
+
+@mcp.tool()
+def close_prepared_tool(
+    database_name: str,
+    statement_id: str
+) -> dict[str, Any]:
+    """
+    準備文をクローズし、リソースを解放します。
+
+    使い終わったPrepared Statementをクローズすることで、
+    データベース接続などのリソースを適切に解放します。
+
+    Args:
+        database_name: 対象データベース名
+        statement_id: 準備文の識別子
+
+    Returns:
+        クローズ結果を含む辞書:
+        - status: "success"
+        - statement_id: ステートメント識別子
+        - message: 成功メッセージ
+
+    Raises:
+        ValueError: ステートメントが存在しない場合
+
+    Example:
+        # Prepared Statementをクローズ
+        close_prepared_tool(
+            database_name="sales_data",
+            statement_id="update_stock"
+        )
+
+    Notes:
+        - 必ずクローズしてリソースリークを防いでください
+        - クローズ後は同じstatement_idを再利用できます
+        - 長時間使用しない場合は早めにクローズすることを推奨
+    """
+    try:
+        return close_prepared(
+            database_name=database_name,
+            statement_id=statement_id
+        )
+    except Exception as e:
+        logger.error(f"Error in close_prepared_tool: {e}")
+        raise
+
+
+@mcp.tool()
+def execute_batch_queries_tool(
+    database_name: str,
+    queries: list[dict[str, Any]],
+    fail_fast: bool = False
+) -> dict[str, Any]:
+    """
+    複数のクエリを効率的に一括実行します。
+
+    複数のSELECTクエリや異なる種類のクエリを
+    1つのデータベース接続で効率的に実行します。
+
+    Args:
+        database_name: 対象データベース名
+        queries: 実行するクエリのリスト
+            各クエリは以下の形式:
+            - query_id: クエリの識別子（一意）
+            - sql: SQL文
+            - params: SQLパラメータ（オプション）
+        fail_fast: 最初の失敗で即座に中止（デフォルト: false）
+            falseの場合、エラーが発生しても他のクエリを続行
+
+    Returns:
+        実行結果を含む辞書:
+        - status: "success" | "partial_success" | "failed"
+        - results: クエリID→結果の辞書
+            各結果は status と data または error を含む
+        - total_queries: 総クエリ数
+        - successful_queries: 成功クエリ数
+        - failed_queries: 失敗クエリ数
+        - execution_time_ms: 実行時間（ミリ秒）
+
+    Raises:
+        FileNotFoundError: データベースが存在しない場合
+        ValueError: クエリが不正な場合
+
+    Examples:
+        # 複数のSELECTクエリを一括実行
+        execute_batch_queries_tool(
+            database_name="analytics",
+            queries=[
+                {
+                    "query_id": "daily_sales",
+                    "sql": "SELECT SUM(amount) FROM orders WHERE date = ?",
+                    "params": ["2025-10-18"]
+                },
+                {
+                    "query_id": "top_products",
+                    "sql": "SELECT product_id, COUNT(*) FROM orders GROUP BY product_id ORDER BY COUNT(*) DESC LIMIT 10"
+                },
+                {
+                    "query_id": "customer_count",
+                    "sql": "SELECT COUNT(DISTINCT customer_id) FROM orders"
+                }
+            ]
+        )
+
+        # 失敗時は即座に中止
+        execute_batch_queries_tool(
+            database_name="production",
+            queries=[...],
+            fail_fast=True
+        )
+
+    Notes:
+        - 各クエリの結果はquery_idでアクセス可能
+        - SELECTとUPDATE/DELETEを混在させることも可能
+        - fail_fast=falseの場合、部分的な成功も返される
+        - 1つのDB接続で実行されるため高速
+    """
+    try:
+        result = execute_batch_queries(
+            database_name=database_name,
+            queries=queries,
+            fail_fast=fail_fast
+        )
+        logger.info(
+            f"Batch queries completed: {result['successful_queries']}/{result['total_queries']} "
+            f"in {result['execution_time_ms']}ms"
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Error in execute_batch_queries_tool: {e}")
         raise
 
 
