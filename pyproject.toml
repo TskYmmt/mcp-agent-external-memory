@@ -1,7 +1,7 @@
 [project]
-name = "mcp-agent-external-memory"
+name = "database-manager"
 version = "0.1.0"
-description = "Autonomous Research Data Accumulation MCP Server"
+description = "SQLite database management library with metadata tracking for MCP servers"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

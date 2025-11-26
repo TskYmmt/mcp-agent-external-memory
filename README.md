@@ -110,7 +110,7 @@ create_database_tool(
 )
 ```
 
-## 提供ツール（全16種）
+## 提供ツール（全18種）
 
 | ツール名 | 用途 | 必須パラメータ |
 |---------|------|--------------|
@@ -129,6 +129,7 @@ create_database_tool(
 | `execute_prepared_tool` | Prepared Statementを実行 | `database_name`, `statement_id`, `params` |
 | `close_prepared_tool` | Prepared Statementをクローズ | `database_name`, `statement_id` |
 | `execute_batch_queries_tool` | 複数クエリを一括実行 | `database_name`, `queries` |
+| `store_markdown_to_record_tool` | Markdownファイルの内容をレコード・カラムに格納 | `database_name`, `table_name`, `record_identifier`, `column_name`, `md_file_path` |
 | `get_schema_tool` | スキーマ取得（互換目的） | `database_name`, `table_name` |
 | `delete_database_tool` | DB削除（2段階確認） | `database_name`, `confirm` |
 
@@ -263,6 +264,133 @@ list_databases_tool()
 # 特定のDBの詳細を確認
 get_database_info_tool(database_name="your_database")
 ```
+
+## ライブラリとして使用する
+
+このパッケージはMCPサーバーとしてだけでなく、Pythonライブラリとしても使用できます。
+他のMCPサーバーやPythonアプリケーションから直接インポートして使用できます。
+
+### インストール
+
+```bash
+# 開発モードでインストール（推奨）
+pip install -e /path/to/mcp-agent-external-memory
+
+# または、パッケージ化してから
+cd /path/to/mcp-agent-external-memory
+pip install .
+```
+
+### 基本的な使い方
+
+```python
+from database_manager import (
+    create_database,
+    insert_data,
+    query_data,
+    get_database_info,
+    execute_transaction,
+    bulk_insert_optimized,
+)
+
+# データベース作成
+create_database(
+    database_name="my_app",
+    schema={
+        "database_description": "アプリケーション用データベース",
+        "tables": [{
+            "table_name": "users",
+            "table_description": "ユーザー情報を格納",
+            "columns": [{
+                "name": "id",
+                "type": "INTEGER",
+                "description": "ユーザーID",
+                "constraints": "PRIMARY KEY AUTOINCREMENT"
+            }]
+        }]
+    }
+)
+
+# データ挿入
+insert_data(
+    database_name="my_app",
+    table_name="users",
+    data={"name": "Alice", "email": "alice@example.com"}
+)
+
+# クエリ実行
+result = query_data(
+    database_name="my_app",
+    sql_query="SELECT * FROM users WHERE name = 'Alice'"
+)
+
+# トランザクション実行
+execute_transaction(
+    database_name="my_app",
+    operations=[
+        {"type": "insert", "table_name": "users", "data": {...}},
+        {"type": "query", "sql": "UPDATE ...", "params": [...]}
+    ]
+)
+```
+
+### データベースディレクトリの設定
+
+環境変数 `MCP_DB_DIR` でデータベースファイルの保存先を変更できます：
+
+```bash
+export MCP_DB_DIR=/shared/databases
+python your_app.py
+```
+
+デフォルトは `databases/` ディレクトリ（パッケージルートからの相対パス）です。
+
+### 他のMCPサーバーから使用する例
+
+```python
+# umw-mcp/server.py など
+from database_manager import insert_data
+
+@mcp.tool()
+def capture_page_tool(url: str) -> dict:
+    # Playwrightでページ取得
+    markdown = get_page_as_markdown(url)
+    
+    # 共通DBに直接保存（LLM経由ではない）
+    result = insert_data(
+        database_name="umw_survey",
+        table_name="page_captures",
+        data={
+            "url": url,
+            "markdown": markdown,
+            "captured_at": datetime.now().isoformat()
+        }
+    )
+    return result
+```
+
+### 公開API一覧
+
+以下の関数が公開されています：
+
+- `create_database` - データベース作成
+- `insert_data` - データ挿入
+- `query_data` - SQLクエリ実行
+- `get_table_schema` - テーブルスキーマ取得
+- `get_table_info` - テーブル詳細情報取得
+- `get_database_info` - データベース詳細情報取得
+- `list_all_databases` - データベース一覧取得
+- `delete_database` - データベース削除
+- `create_table_from_csv` - CSVからテーブル作成
+- `export_table_to_csv` - テーブルをCSVにエクスポート
+- `execute_transaction` - トランザクション実行
+- `bulk_insert_optimized` - バルク挿入最適化
+- `prepare_statement` - Prepared Statement作成
+- `execute_prepared` - Prepared Statement実行
+- `close_prepared` - Prepared Statementクローズ
+- `execute_batch_queries` - バッチクエリ実行
+
+詳細は各関数のdocstringを参照してください。
 
 ## 技術スタック
 

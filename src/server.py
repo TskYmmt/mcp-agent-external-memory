@@ -20,7 +20,34 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 # Import database operations
-from db_operations import (
+# Support both direct execution and package import
+try:
+    from .db_operations import (
+        create_database,
+        insert_data,
+        query_data,
+        get_table_schema,
+        list_all_databases,
+        delete_database,
+        create_table_from_csv,
+        export_table_to_csv,
+        get_database_info,
+        get_table_info,
+        execute_transaction,
+        bulk_insert_optimized,
+        prepare_statement,
+        execute_prepared,
+        close_prepared,
+        execute_batch_queries,
+        store_markdown_to_record,
+    )
+except ImportError:
+    # Fallback for direct execution (when run as script)
+    import sys
+    from pathlib import Path
+    # Add src directory to path
+    sys.path.insert(0, str(Path(__file__).parent))
+    from db_operations import (
     create_database,
     insert_data,
     query_data,
@@ -37,6 +64,7 @@ from db_operations import (
     execute_prepared,
     close_prepared,
     execute_batch_queries,
+    store_markdown_to_record,
 )
 
 # Configure logging
@@ -1067,6 +1095,103 @@ def execute_batch_queries_tool(
         return result
     except Exception as e:
         logger.error(f"Error in execute_batch_queries_tool: {e}")
+        raise
+
+
+@mcp.tool()
+def store_markdown_to_record_tool(
+    database_name: str,
+    table_name: str,
+    record_identifier: dict[str, Any] | Any,
+    column_name: str,
+    md_file_path: str,
+    encoding: str = "utf-8"
+) -> dict[str, Any]:
+    """
+    Markdownファイルの内容を読み込んで、指定されたレコードの指定されたカラムに格納します。
+
+    他のMCPサーバー（例：HTML→Markdown変換ツール）で作成されたMarkdownファイルのパスを指定し、
+    その内容をデータベースの特定レコード・カラムに保存できます。
+
+    Args:
+        database_name: 対象データベース名
+        table_name: 対象テーブル名
+        record_identifier: レコードを特定する方法
+            - 辞書形式: {"column": value, ...} でWHERE条件を指定
+              例: {"id": 123} または {"url": "https://example.com", "session_id": 456}
+            - 単一値: PRIMARY KEYの値として使用（テーブルにPRIMARY KEYが1つの場合）
+              例: 123
+        column_name: 更新するカラム名（Markdownコンテンツを格納するカラム）
+        md_file_path: Markdownファイルのパス（絶対パスまたは相対パス）
+        encoding: ファイルのエンコーディング（デフォルト: utf-8）
+
+    Returns:
+        更新結果を含む辞書:
+        - status: "success"
+        - database_name: データベース名
+        - table_name: テーブル名
+        - column_name: 更新されたカラム名
+        - affected_rows: 更新された行数
+        - md_file_path: 読み込んだファイルの絶対パス
+        - content_length: 読み込んだコンテンツの文字数
+        - record_identifier: 使用したレコード識別子
+
+    Raises:
+        FileNotFoundError: データベースまたはMarkdownファイルが存在しない場合
+        ValueError: レコードが見つからない、カラムが存在しない、またはその他の検証エラー
+
+    Examples:
+        # PRIMARY KEYでレコードを特定
+        store_markdown_to_record_tool(
+            database_name="umw_survey",
+            table_name="page_captures",
+            record_identifier=123,  # PRIMARY KEYの値
+            column_name="markdown_content",
+            md_file_path="/tmp/page_123.md"
+        )
+
+        # WHERE条件でレコードを特定
+        store_markdown_to_record_tool(
+            database_name="umw_survey",
+            table_name="page_captures",
+            record_identifier={"url": "https://example.com", "session_id": 456},
+            column_name="markdown_content",
+            md_file_path="/tmp/example_page.md"
+        )
+
+        # 他のMCPサーバーで作成されたMarkdownファイルを使用
+        # 1. HTML→Markdown変換ツールでページを取得
+        # 2. そのツールが返すMarkdownファイルのパスを使用
+        store_markdown_to_record_tool(
+            database_name="research_data",
+            table_name="web_pages",
+            record_identifier={"page_id": 789},
+            column_name="content_markdown",
+            md_file_path="/tmp/captured_pages/page_789.md"
+        )
+
+    Notes:
+        - レコードが見つからない場合はエラーになります
+        - 複数のレコードがマッチする場合、すべて更新されます（警告ログが出力されます）
+        - ファイルのエンコーディングがUTF-8でない場合は、encodingパラメータを指定してください
+        - 大きなMarkdownファイルでも安全に処理できます
+    """
+    try:
+        result = store_markdown_to_record(
+            database_name=database_name,
+            table_name=table_name,
+            record_identifier=record_identifier,
+            column_name=column_name,
+            md_file_path=md_file_path,
+            encoding=encoding
+        )
+        logger.info(
+            f"Stored Markdown from {md_file_path} to {database_name}.{table_name}.{column_name} "
+            f"({result['affected_rows']} row(s), {result['content_length']} chars)"
+        )
+        return result
+    except Exception as e:
+        logger.error(f"Error in store_markdown_to_record_tool: {e}")
         raise
 
 

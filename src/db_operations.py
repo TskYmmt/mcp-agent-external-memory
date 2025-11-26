@@ -8,6 +8,7 @@ import json
 import logging
 import csv
 import uuid
+import os
 from pathlib import Path
 from datetime import datetime
 from typing import Any
@@ -16,9 +17,11 @@ from typing import Any
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Database directory (at project root)
-DB_DIR = Path(__file__).parent.parent / "databases"
-DB_DIR.mkdir(exist_ok=True)
+# Database directory - can be configured via MCP_DB_DIR environment variable
+# Default: databases/ directory relative to this package
+_default_db_dir = Path(__file__).parent.parent / "databases"
+DB_DIR = Path(os.getenv("MCP_DB_DIR", str(_default_db_dir)))
+DB_DIR.mkdir(parents=True, exist_ok=True)
 
 # Prepared statements cache
 # Format: {statement_id: {"conn": connection, "stmt": cursor, "db_path": path, "sql": sql}}
@@ -1885,6 +1888,191 @@ def execute_batch_queries(
             "failed_queries": failed_count,
             "execution_time_ms": execution_time_ms
         }
+
+    finally:
+        conn.close()
+
+
+def store_markdown_to_record(
+    database_name: str,
+    table_name: str,
+    record_identifier: dict[str, Any] | Any,
+    column_name: str,
+    md_file_path: str,
+    encoding: str = "utf-8"
+) -> dict[str, Any]:
+    """
+    Markdownファイルの内容を読み込んで、指定されたレコードの指定されたカラムに格納します。
+
+    レコードの特定方法:
+    - record_identifierが辞書の場合: WHERE条件として使用（例: {"id": 1, "name": "test"}）
+    - record_identifierが単一値の場合: PRIMARY KEYとして使用（テーブルのPRIMARY KEYを自動検出）
+
+    Args:
+        database_name: 対象データベース名
+        table_name: 対象テーブル名
+        record_identifier: レコードを特定する方法
+            - 辞書: {"column": value, ...} 形式でWHERE条件を指定
+            - 単一値: PRIMARY KEYの値として使用
+        column_name: 更新するカラム名
+        md_file_path: Markdownファイルのパス（絶対パスまたは相対パス）
+        encoding: ファイルのエンコーディング（デフォルト: utf-8）
+
+    Returns:
+        更新結果を含む辞書:
+        - status: "success"
+        - database_name: データベース名
+        - table_name: テーブル名
+        - column_name: 更新されたカラム名
+        - affected_rows: 更新された行数
+        - md_file_path: 読み込んだファイルのパス
+        - content_length: 読み込んだコンテンツの文字数
+
+    Raises:
+        FileNotFoundError: データベースまたはMarkdownファイルが存在しない場合
+        ValueError: レコードが見つからない、またはカラムが存在しない場合
+
+    Example:
+        # PRIMARY KEYで特定
+        store_markdown_to_record(
+            database_name="umw_survey",
+            table_name="page_captures",
+            record_identifier=123,  # PRIMARY KEYの値
+            column_name="markdown_content",
+            md_file_path="/tmp/page_123.md"
+        )
+
+        # WHERE条件で特定
+        store_markdown_to_record(
+            database_name="umw_survey",
+            table_name="page_captures",
+            record_identifier={"url": "https://example.com", "session_id": 456},
+            column_name="markdown_content",
+            md_file_path="/tmp/example_page.md"
+        )
+    """
+    db_path = _get_db_path(database_name)
+
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database '{database_name}' not found")
+
+    # Markdownファイルを読み込む
+    md_path = Path(md_file_path)
+    if not md_path.exists():
+        raise FileNotFoundError(f"Markdown file not found: {md_file_path}")
+
+    try:
+        with open(md_path, encoding=encoding) as f:
+            markdown_content = f.read()
+    except UnicodeDecodeError as e:
+        raise ValueError(
+            f"Failed to decode Markdown file with encoding '{encoding}'. "
+            f"Try a different encoding (e.g., 'shift_jis', 'cp932'). Error: {e}"
+        )
+
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    try:
+        # テーブルが存在するか確認
+        cursor = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,)
+        )
+        if not cursor.fetchone():
+            raise ValueError(f"Table '{table_name}' not found in database '{database_name}'")
+
+        # カラムが存在するか確認
+        cursor = conn.execute(f"PRAGMA table_info({table_name})")
+        columns_info = cursor.fetchall()
+        column_names = [col[1] for col in columns_info]
+        
+        if column_name not in column_names:
+            raise ValueError(
+                f"Column '{column_name}' not found in table '{table_name}'. "
+                f"Available columns: {column_names}"
+            )
+
+        # PRIMARY KEYを取得
+        primary_keys = [col[1] for col in columns_info if col[5]]  # col[5] is pk flag
+
+        # WHERE条件を構築
+        if isinstance(record_identifier, dict):
+            # 辞書の場合: WHERE条件として使用
+            where_conditions = []
+            params = []
+            for col, value in record_identifier.items():
+                if col not in column_names:
+                    raise ValueError(
+                        f"Column '{col}' not found in table '{table_name}'. "
+                        f"Available columns: {column_names}"
+                    )
+                where_conditions.append(f"{col} = ?")
+                params.append(value)
+            
+            where_clause = " AND ".join(where_conditions)
+            
+        elif primary_keys:
+            # PRIMARY KEYが存在する場合: PRIMARY KEYで特定
+            if len(primary_keys) > 1:
+                raise ValueError(
+                    f"Table '{table_name}' has composite primary key. "
+                    f"Please use record_identifier as a dictionary: {primary_keys}"
+                )
+            pk_column = primary_keys[0]
+            where_clause = f"{pk_column} = ?"
+            params = [record_identifier]
+            
+        else:
+            raise ValueError(
+                f"Table '{table_name}' has no PRIMARY KEY. "
+                f"Please use record_identifier as a dictionary with WHERE conditions."
+            )
+
+        # レコードが存在するか確認
+        check_sql = f"SELECT COUNT(*) as cnt FROM {table_name} WHERE {where_clause}"
+        cursor = conn.execute(check_sql, params)
+        count = cursor.fetchone()[0]
+        
+        if count == 0:
+            raise ValueError(
+                f"No record found matching the identifier: {record_identifier}. "
+                f"Please check the record_identifier and ensure the record exists."
+            )
+        elif count > 1:
+            logger.warning(
+                f"Multiple records ({count}) found matching the identifier: {record_identifier}. "
+                f"All matching records will be updated."
+            )
+
+        # UPDATE文を実行
+        update_sql = f"UPDATE {table_name} SET {column_name} = ? WHERE {where_clause}"
+        update_params = [markdown_content] + params
+        
+        cursor = conn.execute(update_sql, update_params)
+        affected_rows = cursor.rowcount
+        conn.commit()
+
+        logger.info(
+            f"Stored Markdown content from {md_file_path} to {database_name}.{table_name}.{column_name} "
+            f"({affected_rows} row(s) updated)"
+        )
+
+        return {
+            "status": "success",
+            "database_name": database_name,
+            "table_name": table_name,
+            "column_name": column_name,
+            "affected_rows": affected_rows,
+            "md_file_path": str(md_path.absolute()),
+            "content_length": len(markdown_content),
+            "record_identifier": record_identifier
+        }
+
+    except sqlite3.Error as e:
+        conn.rollback()
+        logger.error(f"Failed to store Markdown to record: {e}")
+        raise ValueError(f"Database operation failed: {e}")
 
     finally:
         conn.close()
