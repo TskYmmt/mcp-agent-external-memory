@@ -1097,44 +1097,49 @@ def create_table_from_csv(
         conn.close()
 
 
-def export_table_to_csv(
+def export_table_to_file(
     database_name: str,
     table_name: str,
-    csv_path: str,
+    output_path: str,
+    format: str = "csv",
     encoding: str = "utf-8"
 ) -> dict[str, Any]:
     """
-    Export table data to CSV file.
+    Export table data to CSV or JSON file.
 
     Args:
         database_name: Database name (without .db extension)
         table_name: Table name to export
-        csv_path: Absolute path for output CSV file
-        encoding: CSV file encoding (default: utf-8)
+        output_path: Absolute path for output file
+        format: Export format ("csv" or "json", default: "csv")
+        encoding: File encoding (default: utf-8)
 
     Returns:
         Dictionary with export status and statistics
 
     Raises:
         FileNotFoundError: Database not found
-        ValueError: Table not found or invalid path
+        ValueError: Table not found, invalid path, or invalid format
         PermissionError: Cannot write to specified path
     """
+    if format not in ["csv", "json"]:
+        raise ValueError(f"Invalid format: {format}. Must be 'csv' or 'json'")
+
     db_path = _get_db_path(database_name)
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found: {database_name}")
 
     # Validate output path
-    output_path = Path(csv_path)
-    if output_path.exists():
-        raise ValueError(f"CSV file already exists: {csv_path}")
+    file_path = Path(output_path)
+    if file_path.exists():
+        raise ValueError(f"Output file already exists: {output_path}")
 
     # Check parent directory exists and is writable
-    if not output_path.parent.exists():
-        raise ValueError(f"Parent directory does not exist: {output_path.parent}")
+    if not file_path.parent.exists():
+        raise ValueError(f"Parent directory does not exist: {file_path.parent}")
 
-    if not output_path.parent.is_dir():
-        raise ValueError(f"Parent path is not a directory: {output_path.parent}")
+    if not file_path.parent.is_dir():
+        raise ValueError(f"Parent path is not a directory: {file_path.parent}")
 
     conn = sqlite3.connect(db_path)
     try:
@@ -1158,28 +1163,204 @@ def export_table_to_csv(
         # Get column names
         column_names = [description[0] for description in cursor.description]
 
-        # Write to CSV
-        with open(output_path, 'w', encoding=encoding, newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(column_names)  # Header
-            writer.writerows(rows)  # Data
+        # Convert rows to list of dicts for JSON
+        if format == "json":
+            data = []
+            for row in rows:
+                row_dict = {}
+                for i, col_name in enumerate(column_names):
+                    row_dict[col_name] = row[i]
+                data.append(row_dict)
+
+            # Write to JSON
+            with open(file_path, 'w', encoding=encoding) as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+        else:  # CSV
+            # Write to CSV
+            with open(file_path, 'w', encoding=encoding, newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(column_names)  # Header
+                writer.writerows(rows)  # Data
 
         logger.info(
-            f"Exported {len(rows)} rows from {database_name}.{table_name} to {csv_path}"
+            f"Exported {len(rows)} rows from {database_name}.{table_name} to {output_path} ({format.upper()})"
         )
 
-        return {
+        result = {
             "status": "success",
             "database_name": database_name,
             "table_name": table_name,
-            "csv_path": str(output_path.absolute()),
+            "output_path": str(file_path.absolute()),
+            "format": format,
             "row_count": len(rows),
             "column_count": len(column_names),
             "columns": column_names
         }
 
+        # Add format-specific path key for backward compatibility
+        if format == "csv":
+            result["csv_path"] = str(file_path.absolute())
+        else:
+            result["json_path"] = str(file_path.absolute())
+
+        return result
+
     except PermissionError as e:
-        raise PermissionError(f"Cannot write to {csv_path}: {e}")
+        raise PermissionError(f"Cannot write to {output_path}: {e}")
+    finally:
+        conn.close()
+
+
+def export_table_to_csv(
+    database_name: str,
+    table_name: str,
+    csv_path: str,
+    encoding: str = "utf-8"
+) -> dict[str, Any]:
+    """
+    Export table data to CSV file (backward compatibility wrapper).
+
+    Args:
+        database_name: Database name (without .db extension)
+        table_name: Table name to export
+        csv_path: Absolute path for output CSV file
+        encoding: CSV file encoding (default: utf-8)
+
+    Returns:
+        Dictionary with export status and statistics
+    """
+    return export_table_to_file(
+        database_name=database_name,
+        table_name=table_name,
+        output_path=csv_path,
+        format="csv",
+        encoding=encoding
+    )
+
+
+def export_database(
+    database_name: str,
+    export_dir: str,
+    format: str = "csv",
+    encoding: str = "utf-8",
+    table_names: list[str] | None = None
+) -> dict[str, Any]:
+    """
+    Export all tables from a database to files in the specified directory.
+
+    Args:
+        database_name: Database name (without .db extension)
+        export_dir: Directory path where files will be exported
+        format: Export format ("csv" or "json", default: "csv")
+        encoding: File encoding (default: utf-8)
+        table_names: Optional list of table names to export. If None, exports all tables.
+
+    Returns:
+        Dictionary with export status and statistics:
+        - status: "success"
+        - database_name: Database name
+        - export_dir: Export directory path
+        - format: Export format used
+        - tables_exported: List of exported table information
+        - total_tables: Total number of tables exported
+        - total_rows: Total number of rows exported
+
+    Raises:
+        FileNotFoundError: Database not found
+        ValueError: Invalid directory path or format
+        PermissionError: Cannot write to specified directory
+    """
+    if format not in ["csv", "json"]:
+        raise ValueError(f"Invalid format: {format}. Must be 'csv' or 'json'")
+
+    db_path = _get_db_path(database_name)
+    if not db_path.exists():
+        raise FileNotFoundError(f"Database not found: {database_name}")
+
+    # Validate and create export directory
+    export_directory = Path(export_dir)
+    if export_directory.exists() and not export_directory.is_dir():
+        raise ValueError(f"Export path exists but is not a directory: {export_dir}")
+
+    export_directory.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        # Get list of tables to export
+        if table_names is None:
+            # Export all tables (excluding system tables)
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name != '_metadata'
+                ORDER BY name
+            """)
+            table_names = [row[0] for row in cursor.fetchall()]
+        else:
+            # Validate specified tables exist
+            cursor = conn.execute("""
+                SELECT name FROM sqlite_master 
+                WHERE type='table' AND name IN ({})
+            """.format(','.join(['?' for _ in table_names])), table_names)
+            existing_tables = {row[0] for row in cursor.fetchall()}
+            missing_tables = set(table_names) - existing_tables
+            if missing_tables:
+                raise ValueError(
+                    f"Tables not found in database '{database_name}': {', '.join(missing_tables)}"
+                )
+
+        if not table_names:
+            raise ValueError(f"No tables found to export in database '{database_name}'")
+
+        tables_exported = []
+        total_rows = 0
+
+        for table_name in table_names:
+            try:
+                # Determine file extension
+                file_ext = ".json" if format == "json" else ".csv"
+                output_file = export_directory / f"{table_name}{file_ext}"
+
+                # Export table
+                result = export_table_to_file(
+                    database_name=database_name,
+                    table_name=table_name,
+                    output_path=str(output_file),
+                    format=format,
+                    encoding=encoding
+                )
+
+                tables_exported.append({
+                    "table_name": table_name,
+                    "file_path": str(output_file.absolute()),
+                    "row_count": result["row_count"],
+                    "column_count": result["column_count"]
+                })
+                total_rows += result["row_count"]
+
+            except Exception as e:
+                logger.error(f"Failed to export table '{table_name}': {e}")
+                tables_exported.append({
+                    "table_name": table_name,
+                    "status": "failed",
+                    "error": str(e)
+                })
+
+        logger.info(
+            f"Exported {len(tables_exported)} tables from {database_name} to {export_dir} ({format.upper()})"
+        )
+
+        return {
+            "status": "success",
+            "database_name": database_name,
+            "export_dir": str(export_directory.absolute()),
+            "format": format,
+            "tables_exported": tables_exported,
+            "total_tables": len([t for t in tables_exported if "status" not in t]),
+            "total_rows": total_rows,
+            "failed_tables": len([t for t in tables_exported if t.get("status") == "failed"])
+        }
+
     finally:
         conn.close()
 

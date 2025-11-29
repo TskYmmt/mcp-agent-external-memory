@@ -31,6 +31,8 @@ try:
         delete_database,
         create_table_from_csv,
         export_table_to_csv,
+        export_table_to_file,
+        export_database,
         get_database_info,
         get_table_info,
         execute_transaction,
@@ -48,24 +50,26 @@ except ImportError:
     # Add src directory to path
     sys.path.insert(0, str(Path(__file__).parent))
     from db_operations import (
-    create_database,
-    insert_data,
-    query_data,
-    get_table_schema,
-    list_all_databases,
-    delete_database,
-    create_table_from_csv,
-    export_table_to_csv,
-    get_database_info,
-    get_table_info,
-    execute_transaction,
-    bulk_insert_optimized,
-    prepare_statement,
-    execute_prepared,
-    close_prepared,
-    execute_batch_queries,
-    store_markdown_to_record,
-)
+        create_database,
+        insert_data,
+        query_data,
+        get_table_schema,
+        list_all_databases,
+        delete_database,
+        create_table_from_csv,
+        export_table_to_csv,
+        export_table_to_file,
+        export_database,
+        get_database_info,
+        get_table_info,
+        execute_transaction,
+        bulk_insert_optimized,
+        prepare_statement,
+        execute_prepared,
+        close_prepared,
+        execute_batch_queries,
+        store_markdown_to_record,
+    )
 
 # Configure logging
 logging.basicConfig(
@@ -517,77 +521,6 @@ def delete_database_tool(
         return delete_database(database_name, confirm)
     except Exception as e:
         logger.error(f"Error in delete_database_tool: {e}")
-        raise
-
-
-@mcp.tool()
-def export_table_to_csv_tool(
-    database_name: str,
-    table_name: str,
-    csv_path: str,
-    encoding: str = "utf-8"
-) -> dict[str, Any]:
-    """
-    テーブルのデータをCSVファイルにエクスポートします。
-
-    指定されたデータベースのテーブルから全データを取得し、CSVファイルとして出力します。
-    ヘッダー行にはカラム名が含まれます。
-
-    Args:
-        database_name: データベース名（拡張子.db不要）
-        table_name: エクスポートするテーブル名
-        csv_path: 出力先CSVファイルの絶対パス
-        encoding: CSVファイルのエンコーディング（デフォルト: utf-8）
-
-    Returns:
-        エクスポート結果を含む辞書:
-        - status: "success"
-        - database_name: データベース名
-        - table_name: テーブル名
-        - csv_path: 出力されたCSVファイルの絶対パス
-        - row_count: エクスポートされた行数
-        - column_count: カラム数
-        - columns: カラム名のリスト
-
-    Raises:
-        FileNotFoundError: データベースが存在しない
-        ValueError: テーブルが存在しない、またはファイルが既に存在する
-        PermissionError: 指定されたパスに書き込み権限がない
-
-    Example:
-        export_table_to_csv_tool(
-            database_name="sales_data",
-            table_name="monthly_sales",
-            csv_path="/path/to/export/sales_2025.csv"
-        )
-
-    Notes:
-        - 既存ファイルは上書きされません（エラーになります）
-        - 空のテーブルでもヘッダー行のみのCSVが作成されます
-        - エンコーディングエラー時は 'shift_jis' や 'cp932' を試してください
-    """
-    try:
-        result = export_table_to_csv(
-            database_name=database_name,
-            table_name=table_name,
-            csv_path=csv_path,
-            encoding=encoding
-        )
-        logger.info(
-            f"CSV export successful: {result['row_count']} rows to {csv_path}"
-        )
-        return result
-    except FileNotFoundError as e:
-        logger.error(f"Database not found: {e}")
-        raise
-    except ValueError as e:
-        logger.error(f"Validation error: {e}")
-        raise
-    except PermissionError as e:
-        logger.error(f"Permission error: {e}")
-        raise
-    except Exception as e:
-        logger.error(f"Failed to export CSV: {e}")
         raise
 
 
@@ -1095,6 +1028,132 @@ def execute_batch_queries_tool(
         return result
     except Exception as e:
         logger.error(f"Error in execute_batch_queries_tool: {e}")
+        raise
+
+
+@mcp.tool()
+def export_data_tool(
+    database_name: str,
+    output_path: str,
+    format: str = "csv",
+    encoding: str = "utf-8",
+    table_name: str | None = None,
+    table_names: list[str] | None = None
+) -> dict[str, Any]:
+    """
+    データベースのテーブルをCSVまたはJSON形式でエクスポートします。
+
+    単一テーブルまたはデータベース全体のテーブルをエクスポートできます。
+    - table_nameが指定されている場合: そのテーブルを1つのファイルにエクスポート
+    - table_nameがNoneの場合: データベース全体のテーブルを指定ディレクトリにエクスポート
+
+    Args:
+        database_name: データベース名（拡張子.db不要）
+        output_path: 出力先パス（table_name指定時はファイルパス、None時はディレクトリパス）
+        format: エクスポート形式（"csv" または "json"、デフォルト: "csv"）
+        encoding: ファイルのエンコーディング（デフォルト: utf-8）
+        table_name: エクスポートするテーブル名（オプション）
+            - 指定時: そのテーブルを1つのファイルにエクスポート
+            - None時: データベース全体をエクスポート
+        table_names: エクスポートするテーブル名のリスト（table_nameがNoneの場合のみ有効）
+            - Noneの場合: すべてのテーブルをエクスポート（システムテーブルを除く）
+            - 指定した場合: 指定されたテーブルのみエクスポート
+
+    Returns:
+        エクスポート結果を含む辞書:
+        - table_name指定時:
+            - status: "success"
+            - database_name: データベース名
+            - table_name: テーブル名
+            - output_path: 出力されたファイルの絶対パス
+            - format: 使用された形式
+            - row_count: エクスポートされた行数
+            - column_count: カラム数
+            - columns: カラム名のリスト
+        - table_nameがNone時:
+            - status: "success"
+            - database_name: データベース名
+            - export_dir: エクスポート先フォルダの絶対パス
+            - format: 使用された形式
+            - tables_exported: エクスポートされたテーブルの情報リスト
+            - total_tables: エクスポート成功したテーブル数
+            - total_rows: エクスポートされた総行数
+            - failed_tables: エクスポートに失敗したテーブル数
+
+    Raises:
+        FileNotFoundError: データベースが存在しない
+        ValueError: テーブルが存在しない、パスが無効、または無効な形式
+        PermissionError: 指定されたパスに書き込み権限がない
+
+    Examples:
+        # 単一テーブルをCSV形式でエクスポート
+        export_data_tool(
+            database_name="sales_data",
+            table_name="orders",
+            output_path="/path/to/orders.csv",
+            format="csv"
+        )
+
+        # 単一テーブルをJSON形式でエクスポート
+        export_data_tool(
+            database_name="sales_data",
+            table_name="orders",
+            output_path="/path/to/orders.json",
+            format="json"
+        )
+
+        # データベース全体をCSV形式でエクスポート
+        export_data_tool(
+            database_name="sales_data",
+            output_path="/path/to/export",
+            format="csv"
+        )
+
+        # 特定のテーブルのみエクスポート
+        export_data_tool(
+            database_name="sales_data",
+            output_path="/path/to/export",
+            format="csv",
+            table_names=["orders", "customers"]
+        )
+
+    Notes:
+        - table_name指定時: 既存ファイルは上書きされません（エラーになります）
+        - table_nameがNone時: エクスポート先フォルダが存在しない場合は自動的に作成されます
+        - 各テーブルは個別のファイルとして出力されます（例: orders.csv, customers.json）
+        - 一部のテーブルでエラーが発生しても、他のテーブルのエクスポートは継続されます
+        - システムテーブル（sqlite_*）とメタデータテーブル（_metadata）は自動的に除外されます
+    """
+    try:
+        if table_name is not None:
+            # 単一テーブルエクスポート
+            result = export_table_to_file(
+                database_name=database_name,
+                table_name=table_name,
+                output_path=output_path,
+                format=format,
+                encoding=encoding
+            )
+            logger.info(
+                f"{format.upper()} export successful: {result['row_count']} rows from {table_name} to {result['output_path']}"
+            )
+            return result
+        else:
+            # データベース全体エクスポート
+            result = export_database(
+                database_name=database_name,
+                export_dir=output_path,
+                format=format,
+                encoding=encoding,
+                table_names=table_names
+            )
+            logger.info(
+                f"Database export successful: {result['total_tables']} tables, "
+                f"{result['total_rows']} rows to {result['export_dir']} ({format.upper()})"
+            )
+            return result
+    except Exception as e:
+        logger.error(f"Error in export_data_tool: {e}")
         raise
 
 
