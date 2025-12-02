@@ -28,14 +28,33 @@
 
 ## クイックスタート
 
-### 1. インストール
+### 1. uvのインストール
+
+まず、`uv`パッケージマネージャーをインストールします：
 
 ```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+インストール後、シェルを再起動するか、以下のコマンドでPATHに追加します：
+
+```bash
+source $HOME/.local/bin/env
+```
+
+### 2. 依存関係のインストール
+
+```bash
+# プロジェクトディレクトリに移動
+cd /path/to/mcp-agent-external-memory
+
 # 依存関係のインストール
 uv sync
 ```
 
-### 2. Claude Desktop設定
+### 3. MCP設定
+
+#### Claude Desktopの場合
 
 `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
@@ -43,7 +62,7 @@ uv sync
 {
   "mcpServers": {
     "database-manager": {
-      "command": "uv",
+      "command": "/Users/your-username/.local/bin/uv",
       "args": [
         "--directory",
         "/absolute/path/to/mcp-agent-external-memory",
@@ -55,11 +74,35 @@ uv sync
 }
 ```
 
-**重要**: `/absolute/path/to/mcp-agent-external-memory` を実際のパスに置き換えてください。
+**重要**: 
+- `/Users/your-username/.local/bin/uv` を`uv`の実際のパスに置き換えてください（`which uv`で確認できます）
+- `/absolute/path/to/mcp-agent-external-memory` を実際のプロジェクトパスに置き換えてください
 
-### 3. 再起動
+#### Cursorの場合
 
-Claude Desktopを再起動して設定を反映させます。
+プロジェクトルートに`.mcp.json`または`.cursor/mcp.json`を作成：
+
+```json
+{
+  "mcpServers": {
+    "database-manager": {
+      "command": "/Users/your-username/.local/bin/uv",
+      "args": [
+        "--directory",
+        "/absolute/path/to/mcp-agent-external-memory",
+        "run",
+        "src/server.py"
+      ]
+    }
+  }
+}
+```
+
+**注意**: Cursorの環境では`uv`コマンドがPATHに含まれていない場合があるため、フルパスを指定することを推奨します。
+
+### 4. 再起動
+
+Claude DesktopまたはCursorを再起動して設定を反映させます。
 
 ## AIエージェント向けガイド
 
@@ -236,6 +279,35 @@ mcp-agent-external-memory/
 
 ### MCPサーバーが起動しない
 
+#### `uv`コマンドが見つからない（ENOENTエラー）
+
+Cursorなどの環境では、`uv`コマンドがPATHに含まれていない場合があります。設定ファイルで`uv`のフルパスを指定してください：
+
+```json
+{
+  "mcpServers": {
+    "database-manager": {
+      "command": "/Users/your-username/.local/bin/uv",
+      ...
+    }
+  }
+}
+```
+
+`uv`のパスを確認する方法：
+
+```bash
+# uvのインストール場所を確認
+which uv
+# または
+echo $HOME/.local/bin/uv
+
+# uvがインストールされていない場合は再インストール
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+#### その他の確認事項
+
 ```bash
 # uvが正しくインストールされているか確認
 uv --version
@@ -244,6 +316,8 @@ uv --version
 uv sync
 
 # 設定ファイルのパスを確認（src/server.py を含める）
+# MCPサーバーを直接実行してテスト
+uv run src/server.py
 ```
 
 ### スキーマ定義エラー

@@ -1,10 +1,10 @@
 {
   "mcpServers": {
     "database-manager": {
-      "command": "uv",
+      "command": "/Users/yamamoto/.local/bin/uv",
       "args": [
         "--directory",
-        "/Users/tskymmt/mcp/mcp-agent-external-memory",
+        "/Users/yamamoto/mcp/mcp-agent-external-memory",
         "run",
         "src/server.py"
       ]
